@@ -173,26 +173,31 @@ export function attachmentsDir() {
   return process.env.SCREENBRIEF_T3_ATTACHMENTS || path.join(os.homedir(), '.t3', 'userdata', 'attachments');
 }
 
-/** The title newer builds of the phone app write into each movie: "ScreenBrief-<id>". */
+/** The title the phone app writes into each movie: "ScreenBrief-<id>". */
 export const titleFor = (id) => `ScreenBrief-${id}`;
 
 /**
- * The recording as a file the user attached in T3 Code (it stores attachments under
- * ~/.t3/userdata/attachments with generated names). Two ways to recognise it:
- *  1. the movie's title tag is "ScreenBrief-<id>" (exact; written by newer builds of the app);
- *  2. otherwise the movie's creation time is the id's time (the phone's local time, read in this
- *     Mac's time zone), within `toleranceSec`. The closest one wins.
- * Of several copies of the same recording, the most recently attached is returned.
+ * A recording too large to attach in one file is attached as parts titled
+ * "ScreenBrief-<id>-part<k>of<n>". Returns { part, total } for such a title of `id`, else null.
  */
-export async function findAttachedVideo(id, { attachmentsDir: dir = attachmentsDir(), tools, maxAgeDays = 30, toleranceSec = 3 } = {}) {
-  if (!ID_RE.test(String(id))) return null;
-  const want = idTime(id);
-  const title = titleFor(id).toLowerCase();
+export function partOf(title, id) {
+  const prefix = `${titleFor(id)}-part`.toLowerCase();
+  const t = String(title || '').trim().toLowerCase();
+  if (!t.startsWith(prefix)) return null;
+  const m = /^(\d{1,2})of(\d{1,2})$/.exec(t.slice(prefix.length));
+  if (!m) return null;
+  const part = Number(m[1]);
+  const total = Number(m[2]);
+  return part >= 1 && total >= 2 && part <= total ? { part, total } : null;
+}
+
+/** Movies among the T3 Code attachments, newest first, each with its tags. */
+async function scanAttachments(dir, tools, maxAgeDays) {
   let names;
   try {
     names = await fsp.readdir(dir);
   } catch {
-    return null;
+    return [];
   }
   const cutoff = Date.now() - maxAgeDays * 86_400_000;
   const candidates = [];
@@ -207,24 +212,84 @@ export async function findAttachedVideo(id, { attachmentsDir: dir = attachmentsD
     }
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  let byTime = null;
+  const movies = [];
   for (const c of candidates.slice(0, 200)) {
-    let info;
     try {
       const r = await run(tools.ffprobe, ['-v', 'error', '-print_format', 'json', '-show_entries', 'format_tags:stream=codec_type', c.file], { timeoutMs: 30_000 });
-      info = JSON.parse(r.stdout);
+      const info = JSON.parse(r.stdout);
+      if (!(info.streams || []).some((st) => st.codec_type === 'video')) continue;
+      const tags = (info.format && info.format.tags) || {};
+      movies.push({ file: c.file, titles: Object.values(tags).map((v) => String(v).trim().toLowerCase()), created: Date.parse(tags.creation_time || '') });
     } catch {
-      continue; // not a readable movie
+      /* not a readable movie */
     }
-    if (!(info.streams || []).some((st) => st.codec_type === 'video')) continue;
-    const tags = (info.format && info.format.tags) || {};
-    // Candidates are newest first, so the first title match is the most recently attached copy.
-    if (Object.values(tags).some((v) => String(v).trim().toLowerCase() === title)) return c.file;
-    if (!want) continue;
-    const created = Date.parse(tags.creation_time || '');
-    if (!Number.isFinite(created)) continue;
-    const off = Math.abs(created - want.getTime());
-    if (off <= toleranceSec * 1000 && (!byTime || off < byTime.off)) byTime = { file: c.file, off };
   }
-  return byTime ? byTime.file : null;
+  return movies;
+}
+
+/**
+ * The recording among the files the user attached in T3 Code (it stores attachments under
+ * ~/.t3/userdata/attachments with generated names). Returns null, or one of:
+ *   { file }                      the whole recording, recognised by
+ *                                 1. its title tag "ScreenBrief-<id>" (exact; newer app builds), or
+ *                                 2. its creation time being the id's time (the phone's local
+ *                                    time, read in this Mac's time zone) within `toleranceSec`;
+ *                                    the closest one wins.
+ *   { parts: [files], total }     every part of a recording that was attached in parts, in order
+ *   { missing: [k], total }       some parts are attached, these are not
+ * Of several copies of the same file, the most recently attached is used.
+ */
+export async function findAttached(id, { attachmentsDir: dir = attachmentsDir(), tools, maxAgeDays = 30, toleranceSec = 3 } = {}) {
+  if (!ID_RE.test(String(id))) return null;
+  const movies = await scanAttachments(dir, tools, maxAgeDays);
+  const title = titleFor(id).toLowerCase();
+  const whole = movies.find((m) => m.titles.includes(title));
+  if (whole) return { file: whole.file };
+
+  // Parts: the set the newest part belongs to (a recording is only ever split one way, but be exact).
+  const parts = [];
+  for (const m of movies) {
+    const p = m.titles.map((t) => partOf(t, id)).find(Boolean);
+    if (p) parts.push({ ...p, file: m.file });
+  }
+  if (parts.length) {
+    const total = parts[0].total;
+    const files = [];
+    const missing = [];
+    for (let k = 1; k <= total; k++) {
+      const hit = parts.find((p) => p.total === total && p.part === k); // newest first
+      if (hit) files.push(hit.file);
+      else missing.push(k);
+    }
+    return missing.length ? { missing, total } : { parts: files, total };
+  }
+
+  const want = idTime(id);
+  if (!want) return null;
+  let best = null;
+  for (const m of movies) {
+    if (!Number.isFinite(m.created)) continue;
+    const off = Math.abs(m.created - want.getTime());
+    if (off <= toleranceSec * 1000 && (!best || off < best.off)) best = { file: m.file, off };
+  }
+  return best ? { file: best.file } : null;
+}
+
+/** The whole recording as one attached file, or null (see findAttached). */
+export async function findAttachedVideo(id, opts = {}) {
+  const found = await findAttached(id, opts);
+  return found && found.file ? found.file : null;
+}
+
+/** Joins the parts of a recording, in order, into one movie at `out` (no re-encoding). */
+export async function joinParts(tools, files, out) {
+  const listFile = `${out}.parts.txt`;
+  await fsp.mkdir(path.dirname(out), { recursive: true });
+  await fsp.writeFile(listFile, files.map((f) => `file '${f.replace(/'/g, "'\\''")}'\n`).join(''));
+  try {
+    await run(tools.ffmpeg, ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', out], { timeoutMs: 600_000 });
+  } finally {
+    await fsp.rm(listFile, { force: true });
+  }
+  return out;
 }

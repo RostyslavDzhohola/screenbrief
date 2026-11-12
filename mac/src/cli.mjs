@@ -1,5 +1,5 @@
 // Command-line interface: pull, process, frames, doctor.
-import { pullRecording, PullError, bundleDirFor, findAttachedVideo, idTime } from './pull.mjs';
+import { pullRecording, PullError, bundleDirFor, findAttached, joinParts, idTime, titleFor } from './pull.mjs';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -121,21 +121,32 @@ async function cmdPull(args) {
         phoneProblem = e.message;
       }
     }
-    // 2. Otherwise the video the user attached to a T3 Code thread.
+    // 2. Otherwise the video the user attached to a T3 Code thread, whole or in parts.
+    let attachProblem = 'no attached video carries this recording\'s id or start time.';
+    let ask = `attach ${id === 'latest' ? 'the recording' : titleFor(id)} from Photos (album "ScreenBrief") to the thread`;
     if (!pulled && id !== 'latest') {
-      const attached = await findAttachedVideo(id, { tools });
-      if (attached) {
-        say(`using the attached video ${attached}`);
-        pulled = { id, moviePath: attached, meta: null, device: null };
+      const attached = await findAttached(id, { tools });
+      if (attached && attached.file) {
+        say(`using the attached video ${attached.file}`);
+        pulled = { id, moviePath: attached.file, meta: null, device: null };
+      } else if (attached && attached.parts) {
+        say(`joining the ${attached.total} attached parts`);
+        const joined = await joinParts(tools, attached.parts, path.join(staging, `${titleFor(id)}.mov`));
+        pulled = { id, moviePath: joined, meta: null, device: null };
+      } else if (attached && attached.missing) {
+        const have = attached.total - attached.missing.length;
+        const names = attached.missing.map((k) => `${titleFor(id)}-part${k}of${attached.total}`);
+        attachProblem = `this recording was attached in ${attached.total} parts and ${have} of them ${have === 1 ? 'is' : 'are'} here; missing: ${names.join(', ')}.`;
+        ask = `attach the missing part${names.length === 1 ? '' : 's'} (${names.join(', ')}) from Photos (album "ScreenBrief") to the thread`;
       }
     }
     if (!pulled) {
       console.error(
         `screenbrief pull: could not get the video for recording ${id}.\n` +
           `- iPhone: ${phoneProblem}\n` +
-          (id === 'latest' ? '' : `- T3 Code attachments: no attached video was recorded at that time.\n`) +
-          `Do not start on the changes and do not work from the transcript alone. Tell the user you need the video, ask them to attach ` +
-          `${id === 'latest' ? 'the recording' : `ScreenBrief-${id}`} from Photos (album "ScreenBrief") to the thread, and wait. When it is attached, run this command again.`,
+          (id === 'latest' ? '' : `- T3 Code attachments: ${attachProblem}\n`) +
+          `Do not start on the changes and do not work from the transcript alone. Tell the user you need the video, ask them to ${ask}, and wait. ` +
+          `When it is attached, run this command again.`,
       );
       return 2;
     }
