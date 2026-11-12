@@ -92,6 +92,8 @@ final class MovieWriter {
         /// Loudest mic sample seen, 0...1 (0 means digital silence).
         var peakAudioLevel: Double = 0
         var error: String?
+        /// `finish` gave up waiting: the writer may still be writing the file.
+        var finishTimedOut = false
     }
 
     let configuration: Configuration
@@ -267,7 +269,9 @@ final class MovieWriter {
         } else if writer.status != .completed {
             failure = writer.error?.localizedDescription ?? "Finishing the movie failed."
         }
-        return summaryLocked(finished: !timedOut && writer.status == .completed)
+        var summary = summaryLocked(finished: !timedOut && writer.status == .completed)
+        summary.finishTimedOut = timedOut
+        return summary
     }
 
     func snapshot() -> Summary {
