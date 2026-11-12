@@ -1,0 +1,130 @@
+name: ScreenBrief
+options:
+  bundleIdPrefix: com.rostyslav
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: DNCQ8WY9ZQ
+    CODE_SIGN_STYLE: Manual
+    "CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Development: Rostyslav Dzhohola (9C6YVL3BSM)"
+    "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  ScreenBrief:
+    type: application
+    platform: iOS
+    sources:
+      - path: ScreenBrief
+      - path: Shared
+    dependencies:
+      - target: BroadcastExtension
+        embed: true
+    entitlements:
+      path: ScreenBrief/ScreenBrief.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.rostyslav.screenbrief.shared
+    info:
+      path: ScreenBrief/Info.plist
+      properties:
+        CFBundleDisplayName: ScreenBrief
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSPhotoLibraryUsageDescription: ScreenBrief saves your feedback recordings to Photos and shows them here so you can review and copy them.
+        NSPhotoLibraryAddUsageDescription: ScreenBrief saves your feedback recordings to the ScreenBrief album in Photos.
+        NSSpeechRecognitionUsageDescription: ScreenBrief transcribes what you said in a recording, on this iPhone, so the brief you copy includes it.
+        UIFileSharingEnabled: true
+        ITSAppUsesNonExemptEncryption: false
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rostyslav.screenbrief
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": ScreenBrief Dev
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_CFBundleDisplayName: ScreenBrief
+  BroadcastExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: BroadcastExtension
+      - path: Shared
+    entitlements:
+      path: BroadcastExtension/BroadcastExtension.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.rostyslav.screenbrief.shared
+    info:
+      path: BroadcastExtension/Info.plist
+      properties:
+        CFBundleDisplayName: ScreenBrief
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+        NSPhotoLibraryUsageDescription: ScreenBrief saves your feedback recordings to Photos.
+        NSPhotoLibraryAddUsageDescription: ScreenBrief saves your feedback recordings to the ScreenBrief album in Photos.
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rostyslav.screenbrief.broadcast
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": ScreenBrief Broadcast Dev
+        PRODUCT_NAME: BroadcastExtension
+        APPLICATION_EXTENSION_API_ONLY: YES
+  ScreenBriefTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ScreenBriefTests
+    dependencies:
+      - target: ScreenBrief
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rostyslav.screenbrief.tests
+        GENERATE_INFOPLIST_FILE: YES
+        # Hosted in the app (simulator only).
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/ScreenBrief.app/ScreenBrief
+        BUNDLE_LOADER: $(TEST_HOST)
+  ScreenBriefUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: ScreenBriefUITests
+    dependencies:
+      - target: ScreenBrief
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rostyslav.screenbrief.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: ScreenBrief
+        # Real-phone test of the broadcast (ReplayKit does not run in the simulator).
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": ScreenBrief UITests Dev
+schemes:
+  ScreenBrief:
+    build:
+      targets:
+        ScreenBrief: all
+        ScreenBriefTests: [test]
+    test:
+      targets:
+        - ScreenBriefTests
+  ScreenBriefDevice:
+    build:
+      targets:
+        ScreenBrief: all
+        ScreenBriefUITests: [test]
+    test:
+      targets:
+        - ScreenBriefUITests
