@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { loadConfig, ensureDirs, tools as toolPaths, paths, CLI_PATH } from './config.mjs';
-import { processVideo } from './pipeline.mjs';
+import { processVideo, finishedFeedback } from './pipeline.mjs';
 import { probe, extractFrame } from './media.mjs';
 import { doctor } from './doctor.mjs';
 import { fmtTimeForName, readJsonSync, mapLimit } from './util.mjs';
@@ -101,8 +101,8 @@ async function cmdPull(args) {
   const say = (m) => process.stderr.write(`[screenbrief] ${m}\n`);
   // Already here and processed: answer at once.
   if (id !== 'latest' && !args.force) {
-    const done = path.join(bundleDirFor(id), 'FEEDBACK.md');
-    if (fs.existsSync(done)) {
+    const done = finishedFeedback(bundleDirFor(id));
+    if (done) {
       say(`already here; reusing ${bundleDirFor(id)} (--force fetches and processes again)`);
       console.log(done);
       return 0;
@@ -140,8 +140,8 @@ async function cmdPull(args) {
       return 2;
     }
     const outDir = bundleDirFor(pulled.id);
-    const done = path.join(outDir, 'FEEDBACK.md');
-    if (fs.existsSync(done) && !args.force) {
+    const done = finishedFeedback(outDir);
+    if (done && !args.force) {
       say(`already processed; reusing ${outDir}`);
       console.log(done);
       return 0;

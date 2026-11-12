@@ -81,7 +81,7 @@ export function chooseRecording(names, id) {
 /**
  * Copies recording `id` from the phone into `destDir`. Returns { id, moviePath, meta, device }.
  */
-export async function pullRecording(id, { device: wanted, destDir, log = () => {} } = {}) {
+export async function pullRecording(id, { device: wanted, destDir, log = () => {}, sidecarRetries = 5, sidecarWaitMs = 3000 } = {}) {
   if (id !== 'latest' && !ID_RE.test(id)) throw new PullError(`"${id}" is not a recording id (letters, digits and dashes), nor "latest".`);
   const list = await devicectl(['list', 'devices'], { timeoutMs: 60_000 });
   const devices = pickDevices(list.json, wanted);
@@ -108,6 +108,19 @@ export async function pullRecording(id, { device: wanted, destDir, log = () => {
       continue;
     }
     const realId = movie.replace(MOVIE_RE, '');
+    // The app writes <id>.json once its copy of the movie is complete. Without it the movie may
+    // still be on its way out of Photos, and a partial file would process into a short bundle.
+    let complete = names.includes(`${realId}.json`);
+    for (let attempt = 0; !complete && attempt < sidecarRetries; attempt++) {
+      log(`${movie} is still being copied out of Photos on the phone; waiting`);
+      await new Promise((r) => setTimeout(r, sidecarWaitMs));
+      const again = await devicectl(['device', 'info', 'files', ...domain]);
+      complete = again.code === 0 && fileNames(again.json).includes(`${realId}.json`);
+    }
+    if (!complete) {
+      lastProblem = `${device.name}: ScreenBrief has not finished saving recording ${realId} (its copy from Photos is incomplete). Open ScreenBrief on the iPhone, wait until the recording shows in the list, then run this again.`;
+      continue;
+    }
     await fsp.mkdir(destDir, { recursive: true });
     const moviePath = path.join(destDir, movie);
     log(`copying ${movie} from ${device.name}`);
@@ -117,16 +130,20 @@ export async function pullRecording(id, { device: wanted, destDir, log = () => {
       continue;
     }
     let meta = null;
-    if (names.includes(`${realId}.json`)) {
-      const metaPath = path.join(destDir, `${realId}.json`);
-      const m = await devicectl(['device', 'copy', 'from', ...domain, '--source', `${PHONE_DIR}/${realId}.json`, '--destination', metaPath]);
-      if (m.code === 0) {
-        try {
-          meta = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
-        } catch {
-          meta = null;
-        }
+    const metaPath = path.join(destDir, `${realId}.json`);
+    const m = await devicectl(['device', 'copy', 'from', ...domain, '--source', `${PHONE_DIR}/${realId}.json`, '--destination', metaPath]);
+    if (m.code === 0) {
+      try {
+        meta = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
+      } catch {
+        meta = null;
       }
+    }
+    // The app records the movie's size; a copy that came out shorter was cut off on the way.
+    const got = fs.statSync(moviePath).size;
+    if (meta && Number(meta.sizeBytes) > 0 && got !== Number(meta.sizeBytes)) {
+      lastProblem = `${device.name}: the copy of ${movie} is incomplete (${got} of ${meta.sizeBytes} bytes). Keep the iPhone unlocked and near the Mac, then run this again.`;
+      continue;
     }
     return { id: realId, moviePath, meta, device };
   }
@@ -156,14 +173,21 @@ export function attachmentsDir() {
   return process.env.SCREENBRIEF_T3_ATTACHMENTS || path.join(os.homedir(), '.t3', 'userdata', 'attachments');
 }
 
+/** The title newer builds of the phone app write into each movie: "ScreenBrief-<id>". */
+export const titleFor = (id) => `ScreenBrief-${id}`;
+
 /**
  * The recording as a file the user attached in T3 Code (it stores attachments under
- * ~/.t3/userdata/attachments with generated names). The phone stamps each movie with its start
- * time, which is also its id, so the match is on that timestamp.
+ * ~/.t3/userdata/attachments with generated names). Two ways to recognise it:
+ *  1. the movie's title tag is "ScreenBrief-<id>" (exact; written by newer builds of the app);
+ *  2. otherwise the movie's creation time is the id's time (the phone's local time, read in this
+ *     Mac's time zone), within `toleranceSec`. The closest one wins.
+ * Of several copies of the same recording, the most recently attached is returned.
  */
 export async function findAttachedVideo(id, { attachmentsDir: dir = attachmentsDir(), tools, maxAgeDays = 30, toleranceSec = 3 } = {}) {
+  if (!ID_RE.test(String(id))) return null;
   const want = idTime(id);
-  if (!want) return null;
+  const title = titleFor(id).toLowerCase();
   let names;
   try {
     names = await fsp.readdir(dir);
@@ -183,16 +207,24 @@ export async function findAttachedVideo(id, { attachmentsDir: dir = attachmentsD
     }
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  let byTime = null;
   for (const c of candidates.slice(0, 200)) {
+    let info;
     try {
-      const r = await run(tools.ffprobe, ['-v', 'error', '-print_format', 'json', '-show_entries', 'format_tags=creation_time:stream=codec_type', c.file], { timeoutMs: 30_000 });
-      const info = JSON.parse(r.stdout);
-      const created = Date.parse((info.format && info.format.tags && info.format.tags.creation_time) || '');
-      const hasVideo = (info.streams || []).some((st) => st.codec_type === 'video');
-      if (hasVideo && Number.isFinite(created) && Math.abs(created - want.getTime()) <= toleranceSec * 1000) return c.file;
+      const r = await run(tools.ffprobe, ['-v', 'error', '-print_format', 'json', '-show_entries', 'format_tags:stream=codec_type', c.file], { timeoutMs: 30_000 });
+      info = JSON.parse(r.stdout);
     } catch {
-      /* not a readable movie */
+      continue; // not a readable movie
     }
+    if (!(info.streams || []).some((st) => st.codec_type === 'video')) continue;
+    const tags = (info.format && info.format.tags) || {};
+    // Candidates are newest first, so the first title match is the most recently attached copy.
+    if (Object.values(tags).some((v) => String(v).trim().toLowerCase() === title)) return c.file;
+    if (!want) continue;
+    const created = Date.parse(tags.creation_time || '');
+    if (!Number.isFinite(created)) continue;
+    const off = Math.abs(created - want.getTime());
+    if (off <= toleranceSec * 1000 && (!byTime || off < byTime.off)) byTime = { file: c.file, off };
   }
-  return null;
+  return byTime ? byTime.file : null;
 }

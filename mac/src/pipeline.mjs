@@ -23,6 +23,13 @@ export function deviceString(meta) {
   return [name, d.os].filter(Boolean).join(', ') || null;
 }
 
+/** The bundle's FEEDBACK.md, if `dir` holds a bundle whose processing finished; otherwise null. */
+export function finishedFeedback(dir) {
+  const file = path.join(dir, 'FEEDBACK.md');
+  const status = readJsonSync(path.join(dir, 'status.json'), null);
+  return fs.existsSync(file) && status && status.state === 'ready' ? file : null;
+}
+
 export async function writeStatus(dir, status) {
   await writeJsonAtomic(path.join(dir, 'status.json'), { ...status, updatedAt: new Date().toISOString() });
 }
@@ -57,6 +64,9 @@ export async function processVideo(input, opts = {}) {
   let rotatedInput = null;
   try {
     if (!fs.existsSync(input)) throw new Error(`input not found: ${input}`);
+    // Processing again into the same folder: the old result must not pass for the new one if
+    // this attempt fails part-way.
+    await fsp.rm(path.join(dir, 'FEEDBACK.md'), { force: true });
     // 1. transcoding
     await status('transcoding');
     // Leftovers from an interrupted earlier attempt.
