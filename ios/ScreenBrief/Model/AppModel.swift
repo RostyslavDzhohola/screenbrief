@@ -6,7 +6,8 @@ import SwiftUI
 import UIKit
 
 /// The app's state: recordings found in Photos are copied into `Documents/Recordings/` (where the
-/// Mac pulls them from), thumbnailed and transcribed on the phone, one at a time.
+/// Mac pulls them from), thumbnailed and transcribed on the phone, one at a time. One that is too
+/// large to attach is also split into parts that fit, saved to Photos.
 @MainActor @Observable
 final class AppModel {
     private(set) var recordings: [Recording] = []
@@ -24,18 +25,28 @@ final class AppModel {
     private var refreshing = false
     private var transcribeQueue: [String] = []
     private var transcribing = false
+    private var splitQueue: [String] = []
+    private var splitting = false
+    private var splittingID: String?
     private var started = false
 
     /// The transcription itself and its time limit; injectable for tests.
     private let transcribe: Transcriber.Work
     private let transcriptionDeadline: (_ durationSec: Double) -> TimeInterval
+    /// Splitting a movie into parts, and saving one part to Photos; injectable for tests.
+    private let split: MovieSplitter.Work
+    private let savePart: MovieSplitter.Save
 
     init(files: RecordingFiles = .standard,
          transcribe: @escaping Transcriber.Work = { try await Transcriber.transcribe(movie: $0, workDirectory: $1) },
-         transcriptionDeadline: @escaping (_ durationSec: Double) -> TimeInterval = Transcriber.deadline(forDuration:)) {
+         transcriptionDeadline: @escaping (_ durationSec: Double) -> TimeInterval = Transcriber.deadline(forDuration:),
+         split: @escaping MovieSplitter.Work = { try await MovieSplitter.split(movie: $0, id: $1, into: $2) },
+         savePart: @escaping MovieSplitter.Save = { try RecordingAlbum.save(movie: $0, fileName: $1, creationDate: $2) }) {
         self.files = files
         self.transcribe = transcribe
         self.transcriptionDeadline = transcriptionDeadline
+        self.split = split
+        self.savePart = savePart
     }
 
     var canReadPhotos: Bool { RecordingAlbum.canAdd(photosStatus) }
@@ -59,9 +70,15 @@ final class AppModel {
         if speechStatus == .notDetermined {
             speechStatus = await Transcriber.requestAuthorization()
         }
-        // Anything a previous launch left half done.
-        for r in recordings where r.transcriptStatus == .pending || r.transcriptStatus == .running { enqueueTranscription(r.id) }
+        resumeUnfinished()
         await refresh()
+    }
+
+    /// Queues what a previous launch left half done: transcripts, and the parts of recordings
+    /// too large to attach.
+    func resumeUnfinished() {
+        for r in recordings where r.transcriptStatus == .pending || r.transcriptStatus == .running { enqueueTranscription(r.id) }
+        for r in recordings where r.needsParts { enqueueSplit(r.id) }
     }
 
     /// The recordings already on disk, after clearing out what earlier launches left behind.
@@ -69,6 +86,7 @@ final class AppModel {
         files.prepare()
         files.removeLeftoverMarkImages()
         files.removeStalePartials()
+        files.removeLeftoverParts()
         recordings = files.loadAll()
     }
 
@@ -135,12 +153,14 @@ final class AppModel {
         await Thumbnailer.make(movie: files.movie(r), to: files.thumbnail(r.id))
         insert(r)
         enqueueTranscription(r.id)
+        enqueueSplit(r.id)
     }
 
     /// The extension's own id (from "ScreenBrief-<id>.mov"), otherwise one from the creation time.
+    /// A part's name ("ScreenBrief-<id>-part2of3.mov") is never read as an id.
     static func recordingID(fileName: String, created: Date) -> String {
         let stem = (fileName as NSString).deletingPathExtension
-        if stem.hasPrefix(RecordingAlbum.filePrefix) {
+        if stem.hasPrefix(RecordingAlbum.filePrefix), !RecordingAlbum.isPart(fileName: fileName) {
             let id = String(stem.dropFirst(RecordingAlbum.filePrefix.count)).lowercased()
             if RecordingID.isValid(id), id.count >= 3 { return id }
         }
@@ -210,6 +230,54 @@ final class AppModel {
         transcribing = false
     }
 
+    // MARK: Parts
+
+    /// Queues a too-large recording to be split into parts that fit T3 Code's limit. Nothing
+    /// happens for one that fits, or whose parts are already in Photos.
+    func enqueueSplit(_ id: String) {
+        guard let r = recordings.first(where: { $0.id == id }), r.needsParts,
+              id != splittingID, !splitQueue.contains(id) else { return }
+        update(id) { $0.partsStatus = .pending; $0.partCount = nil; $0.partsNote = nil }
+        splitQueue.append(id)
+        guard !splitting else { return }
+        splitting = true
+        Task { await drainSplits() }
+    }
+
+    /// One recording at a time, off the main thread, next to (not behind) transcription.
+    private func drainSplits() async {
+        while !splitQueue.isEmpty {
+            let id = splitQueue.removeFirst()
+            guard let r = recordings.first(where: { $0.id == id }), r.needsParts else { continue }
+            splittingID = id
+            update(id) { $0.partsStatus = .running }
+            let movie = files.movie(r)
+            let directory = files.parts.appendingPathComponent(id, isDirectory: true)
+            let startedAt = r.startedAt
+            let split = split
+            let savePart = savePart
+            let work = Task.detached(priority: .utility) { () -> Int in
+                // Saved or not, the part files go: Photos has its own copies.
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let parts = try await split(movie, id, directory)
+                guard parts.count >= 2 else { throw WriterError("The video was not split into parts.") }
+                for part in parts {
+                    // Each part's date is its place in the recording, so Photos sorts them in order.
+                    _ = try savePart(part.url, part.url.lastPathComponent, startedAt.addingTimeInterval(part.offsetSec))
+                }
+                return parts.count
+            }
+            do {
+                let count = try await work.value
+                update(id) { $0.partsStatus = .done; $0.partCount = count; $0.partsNote = nil }
+            } catch {
+                update(id) { $0.partsStatus = .failed; $0.partCount = nil; $0.partsNote = error.localizedDescription }
+            }
+            splittingID = nil
+        }
+        splitting = false
+    }
+
     // MARK: Actions
 
     func copyBrief(_ r: Recording) {
@@ -223,6 +291,7 @@ final class AppModel {
         files.setDismissed(dismissed)
         recordings.removeAll { $0.id == r.id }
         transcribeQueue.removeAll { $0 == r.id }
+        splitQueue.removeAll { $0 == r.id }
     }
 
     func thumbnail(_ r: Recording) -> UIImage? {

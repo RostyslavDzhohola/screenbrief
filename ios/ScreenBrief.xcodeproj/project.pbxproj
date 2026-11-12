@@ -14,6 +14,7 @@
 		225D13C0C85D35B1FF25E8E2 /* Brief.swift in Sources */ = {isa = PBXBuildFile; fileRef = F48AC05BD296F04831F344A8 /* Brief.swift */; };
 		26B272CDF8A152644A111A27 /* DeviceTestCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5481BAC378C17A6714CE9B7 /* DeviceTestCase.swift */; };
 		27761787B090A2517AF93363 /* OversizeWarningUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2885A8DB1893C76FB04093B /* OversizeWarningUITests.swift */; };
+		29099D662B94523B6C287B53 /* MovieSplitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93BFE95E8332506E664760A0 /* MovieSplitter.swift */; };
 		301CA5EF845AC69C60B4C884 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 06B79C196B9F8BCE4DC32EB9 /* Assets.xcassets */; };
 		34CFA0434F28F9A30452DB97 /* RecordingDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3E64ED747A5EF405728C351 /* RecordingDetailView.swift */; };
 		3E855E25D36891A9CAD1D0C5 /* MovieWriterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA11E5537FFD177F76E31955 /* MovieWriterTests.swift */; };
@@ -27,6 +28,7 @@
 		9C744C2FB944C85754920EA1 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0A31F703E00250D8816991 /* HomeView.swift */; };
 		B7418E82246427578DB4A093 /* RecordingAlbum.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8FF53255FC1C6047672803 /* RecordingAlbum.swift */; };
 		B78BA6666DFFCB33112C156B /* MovieWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81815F567CC0E5AB7985F9FE /* MovieWriter.swift */; };
+		B9B8DF9D29A2A420D44580D4 /* MovieSplitterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60E01C6B0462E9A82B0F3AF /* MovieSplitterTests.swift */; };
 		BAC3108B500792FDA5388A59 /* MovieWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81815F567CC0E5AB7985F9FE /* MovieWriter.swift */; };
 		BC34544653C03A55429A8977 /* DeviceBroadcastTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E8E40BC382D19847A139AA6 /* DeviceBroadcastTests.swift */; };
 		BFAE5BC8E151DB7E620C3E05 /* BroadcastPickerButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = F897D846B7E84004DAF02A5F /* BroadcastPickerButton.swift */; };
@@ -91,6 +93,7 @@
 		4C432D901D2B0F2F846D5A7F /* RecordingLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingLibrary.swift; sourceTree = "<group>"; };
 		81815F567CC0E5AB7985F9FE /* MovieWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovieWriter.swift; sourceTree = "<group>"; };
 		8774077BAAD3BB2C96F18EB8 /* BroadcastExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BroadcastExtension.entitlements; sourceTree = "<group>"; };
+		93BFE95E8332506E664760A0 /* MovieSplitter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovieSplitter.swift; sourceTree = "<group>"; };
 		95BA5FE627F799F776E192D4 /* Recording.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recording.swift; sourceTree = "<group>"; };
 		9E5F4035200FB4304CEB6364 /* SampleHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleHandler.swift; sourceTree = "<group>"; };
 		9E8E40BC382D19847A139AA6 /* DeviceBroadcastTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceBroadcastTests.swift; sourceTree = "<group>"; };
@@ -106,6 +109,7 @@
 		E5481BAC378C17A6714CE9B7 /* DeviceTestCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceTestCase.swift; sourceTree = "<group>"; };
 		F18DFDE5CB523C1905417AC1 /* ScreenBriefTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ScreenBriefTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F48AC05BD296F04831F344A8 /* Brief.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Brief.swift; sourceTree = "<group>"; };
+		F60E01C6B0462E9A82B0F3AF /* MovieSplitterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovieSplitterTests.swift; sourceTree = "<group>"; };
 		F7E739B232A0736F235EA7E5 /* BriefTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BriefTests.swift; sourceTree = "<group>"; };
 		F897D846B7E84004DAF02A5F /* BroadcastPickerButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BroadcastPickerButton.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -127,6 +131,7 @@
 			isa = PBXGroup;
 			children = (
 				F7E739B232A0736F235EA7E5 /* BriefTests.swift */,
+				F60E01C6B0462E9A82B0F3AF /* MovieSplitterTests.swift */,
 				DA11E5537FFD177F76E31955 /* MovieWriterTests.swift */,
 				BF9EE46E6E43E539D9D48514 /* TestSupport.swift */,
 			);
@@ -150,6 +155,7 @@
 			children = (
 				138E1F726F66249D1875D3C3 /* AppModel.swift */,
 				F48AC05BD296F04831F344A8 /* Brief.swift */,
+				93BFE95E8332506E664760A0 /* MovieSplitter.swift */,
 				95BA5FE627F799F776E192D4 /* Recording.swift */,
 				4C432D901D2B0F2F846D5A7F /* RecordingLibrary.swift */,
 				32285B1AC22CACB55D863C76 /* Transcriber.swift */,
@@ -355,6 +361,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				19597EF85B7369E4ADCF7C72 /* BriefTests.swift in Sources */,
+				B9B8DF9D29A2A420D44580D4 /* MovieSplitterTests.swift in Sources */,
 				3E855E25D36891A9CAD1D0C5 /* MovieWriterTests.swift in Sources */,
 				DB02B1C2A57C609E991FE047 /* TestSupport.swift in Sources */,
 			);
@@ -369,6 +376,7 @@
 				BFAE5BC8E151DB7E620C3E05 /* BroadcastPickerButton.swift in Sources */,
 				C39F5225F7D8776FBC1F02DE /* BroadcastRecorder.swift in Sources */,
 				9C744C2FB944C85754920EA1 /* HomeView.swift in Sources */,
+				29099D662B94523B6C287B53 /* MovieSplitter.swift in Sources */,
 				BAC3108B500792FDA5388A59 /* MovieWriter.swift in Sources */,
 				980D77015E061F3A53099E3C /* Recording.swift in Sources */,
 				81037E077CAA2161BEE4C645 /* RecordingAlbum.swift in Sources */,

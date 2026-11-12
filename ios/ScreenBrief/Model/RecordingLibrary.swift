@@ -9,6 +9,10 @@ import UIKit
 struct RecordingFiles {
     var documents: URL
     var support: URL
+    /// Where the parts of a too-large recording are written before they go to Photos. In the
+    /// caches, not in `recordings`: the Mac lists that folder and would take them for recordings.
+    var parts: URL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Parts", isDirectory: true)
 
     static var standard: RecordingFiles {
         let fm = FileManager.default
@@ -85,6 +89,11 @@ struct RecordingFiles {
         }
     }
 
+    /// Deletes part files that an earlier launch wrote and did not get to Photos.
+    func removeLeftoverParts() {
+        try? FileManager.default.removeItem(at: parts)
+    }
+
     func dismissed() -> Set<String> {
         (try? JSONDecoder().decode(Set<String>.self, from: Data(contentsOf: dismissedFile))) ?? []
     }
@@ -112,7 +121,9 @@ enum PhotoSource {
         if let album = RecordingAlbum.fetchAlbum() {
             let assets = PHAsset.fetchAssets(in: album, options: videoOptions(limit: 200))
             assets.enumerateObjects { asset, _, _ in
-                found[asset.localIdentifier] = Candidate(asset: asset, source: "screenbrief", fileName: fileName(of: asset))
+                let name = fileName(of: asset)
+                guard !RecordingAlbum.isPart(fileName: name) else { return }
+                found[asset.localIdentifier] = Candidate(asset: asset, source: "screenbrief", fileName: name)
             }
         }
         let recent = PHAsset.fetchAssets(with: .video, options: videoOptions(limit: 60))
@@ -120,6 +131,7 @@ enum PhotoSource {
         recent.enumerateObjects { asset, _, _ in
             guard found[asset.localIdentifier] == nil else { return }
             let name = fileName(of: asset)
+            guard !RecordingAlbum.isPart(fileName: name) else { return }
             if name.hasPrefix(RecordingAlbum.filePrefix) {
                 found[asset.localIdentifier] = Candidate(asset: asset, source: "screenbrief", fileName: name)
             } else if asset.mediaSubtypes.contains(.videoScreenRecording),

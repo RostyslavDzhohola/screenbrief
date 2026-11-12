@@ -87,9 +87,288 @@ final class BriefTests: XCTestCase {
         XCTAssertEqual(AttachmentAdvice.recordingTitle(elapsed: 75, fileBytes: 0), "Recording 1:15  ·  tap to stop")
         XCTAssertEqual(AttachmentAdvice.recordingTitle(elapsed: 600, fileBytes: 20_000_000), "Recording 10:00  ·  tap to stop",
                        "a still screen: ten minutes that are still small")
-        XCTAssertEqual(AttachmentAdvice.recordingTitle(elapsed: 300, fileBytes: 53_000_000), "Recording 5:00  ·  too large to attach")
-        XCTAssertEqual(AttachmentAdvice.recordingTitle(elapsed: 900), "Recording 15:00  ·  too large to attach",
+        XCTAssertEqual(AttachmentAdvice.recordingTitle(elapsed: 300, fileBytes: 53_000_000), "Recording 5:00  ·  will be split to attach")
+        XCTAssertEqual(AttachmentAdvice.recordingTitle(elapsed: 900), "Recording 15:00  ·  will be split to attach",
                        "no size from the extension: estimated from the time")
+    }
+
+    // MARK: Parts of a recording too large to attach
+
+    private func large(_ status: PartsStatus?, parts: Int? = nil, note: String? = nil) -> Recording {
+        var r = recording(transcript: [.init(t: 1, text: "ok")], size: 61_300_000)
+        r.partsStatus = status
+        r.partCount = parts
+        r.partsNote = note
+        return r
+    }
+
+    func testBriefForARecordingAttachedAsParts() {
+        let text = Brief.text(for: large(.done, parts: 3), timeZone: utc)
+        XCTAssertEqual(text, """
+        Phone feedback recording 20261111-224105: 15 seconds, recorded 2026-11-11 22:41 on iPhone (iPhone14,3, iOS 27.0.1).
+        I recorded my iPhone screen while using my app and said what I want changed.
+
+        Agent: get the video before doing anything else. On the Mac run:  screenbrief pull 20261111-224105
+        The video is 61.3 MB, over T3 Code's 50 MB attachment limit, so it is attached to this thread as 3 parts (ScreenBrief-20261111-224105-part1of3 to part3of3). The command joins the parts (or copies the whole video from my iPhone when the phone is unlocked and on the same Wi-Fi as the Mac or plugged in) and prints the path of a FEEDBACK.md: what I said on a timeline next to screenshots of the screen at each moment. Read it, open the frames, then make the changes I describe.
+        If it cannot get the video, do not start on the changes and do not work from the transcript alone. Tell me what the command said is missing, ask me to attach all 3 parts from Photos (album "ScreenBrief") to this thread, and wait. When I have attached them, run the command again.
+
+        What I said (transcribed on the phone, may have errors; times are from the start of the video):
+        [00:01] ok
+        """)
+        XCTAssertTrue(text.unicodeScalars.allSatisfy { $0.isASCII })
+    }
+
+    /// Until the parts are in Photos (and for a recording from before there were parts), the
+    /// brief says what it said before: the video is not attached.
+    func testBriefKeepsItsWordingUntilThePartsAreDone() {
+        let before = Brief.text(for: large(nil), timeZone: utc)
+        XCTAssertTrue(before.contains("so it is not attached to this thread: the command copies it from my iPhone"))
+        XCTAssertTrue(before.contains("Tell me the Mac could not reach my iPhone, and wait"))
+        for r in [large(.pending), large(.running), large(.failed, note: "Photos is full"), large(.done), large(.done, parts: 1)] {
+            XCTAssertEqual(Brief.text(for: r, timeZone: utc), before, "\(String(describing: r.partsStatus))")
+        }
+        // Parts are only ever for a recording over the limit.
+        var small = recording(transcript: [.init(t: 1, text: "ok")])
+        let plain = Brief.text(for: small, timeZone: utc)
+        small.partsStatus = .done
+        small.partCount = 3
+        XCTAssertEqual(Brief.text(for: small, timeZone: utc), plain)
+    }
+
+    func testAttachmentAdviceForParts() {
+        let done = large(.done, parts: 3)
+        XCTAssertEqual(AttachmentAdvice.row(for: done), "Attach as 3 parts")
+        XCTAssertEqual(AttachmentAdvice.detail(for: done),
+                       "Too large to attach in one file (61.3 MB; T3 Code's limit is 50 MB). It is saved in Photos as 3 parts: attach all 3 with the pasted text.")
+        XCTAssertEqual(AttachmentAdvice.copied(for: done),
+                       "Copied. Paste it in your T3 Code thread. Away from your Mac? Also attach all 3 parts of this video from Photos.")
+
+        for preparing in [large(.pending), large(.running)] {
+            XCTAssertEqual(AttachmentAdvice.row(for: preparing), "Splitting into parts to attach…")
+            XCTAssertEqual(AttachmentAdvice.detail(for: preparing), "Too large to attach in one file. Splitting it into parts…")
+            XCTAssertEqual(AttachmentAdvice.copied(for: preparing), AttachmentAdvice.copied(for: large(nil)))
+        }
+
+        let failed = large(.failed, note: "Photos is full")
+        XCTAssertEqual(AttachmentAdvice.row(for: failed), "Too large to attach in T3 Code")
+        XCTAssertEqual(AttachmentAdvice.detail(for: failed), AttachmentAdvice.detail(for: large(nil)))
+        XCTAssertEqual(AttachmentAdvice.copied(for: failed), AttachmentAdvice.copied(for: large(nil)))
+    }
+
+    func testPartsStateIsKeptInTheSidecar() throws {
+        let r = large(.done, parts: 3)
+        let back = try JSONCoding.decoder.decode(Recording.self, from: JSONCoding.encoder.encode(r))
+        XCTAssertEqual(back, r)
+        XCTAssertEqual(back.attachableParts, 3)
+        let failed = large(.failed, note: "Photos is full")
+        XCTAssertEqual(try JSONCoding.decoder.decode(Recording.self, from: JSONCoding.encoder.encode(failed)), failed)
+        let json = try JSONSerialization.jsonObject(with: JSONCoding.encoder.encode(recording())) as! [String: Any]
+        XCTAssertNil(json["partsStatus"], "left out for a recording that fits")
+        XCTAssertNil(json["partCount"])
+    }
+
+    func testSidecarWrittenBeforePartsStillDecodes() throws {
+        // A too-large recording as a build without parts saved it.
+        let old = """
+        {"assetId":"A/L0/001","device":{"model":"iPhone14,3","name":"iPhone","os":"iOS 27.0.1"},"durationSec":612.4,
+         "file":"20261111-224105.mov","hasMicAudio":true,"id":"20261111-224105","peakAudioLevel":0.31,"sizeBytes":61300000,
+         "source":"screenbrief","startedAt":"2026-11-11T22:41:05.000Z","transcribeSec":31.4,
+         "transcript":[{"t":1,"text":"ok"}],"transcriptNote":"on-device (speech, took 31 seconds)","transcriptStatus":"done"}
+        """
+        let r = try JSONCoding.decoder.decode(Recording.self, from: Data(old.utf8))
+        XCTAssertEqual(r.sizeBytes, 61_300_000)
+        XCTAssertNil(r.partsStatus)
+        XCTAssertNil(r.partCount)
+        XCTAssertNil(r.partsNote)
+        XCTAssertTrue(r.needsParts, "its parts are made at the next launch")
+        XCTAssertFalse(r.isSplitting)
+        XCTAssertEqual(AttachmentAdvice.row(for: r), "Too large to attach in T3 Code")
+    }
+
+    @MainActor
+    func testPartFileNamesAreNotRecordings() {
+        XCTAssertEqual(RecordingAlbum.partTitle(id: "20261111-224833", part: 2, of: 3), "ScreenBrief-20261111-224833-part2of3")
+        for name in ["ScreenBrief-20261111-224833-part1of3.mov", "ScreenBrief-20261111-224833-part12of12.mov",
+                     "ScreenBrief-20261111-224833-2-part2of2.mov", "screenbrief-20261111-224833-PART1OF3.MOV",
+                     RecordingAlbum.partTitle(id: "20261111-224833", part: 99, of: 99) + ".mov"] {
+            XCTAssertTrue(RecordingAlbum.isPart(fileName: name), name)
+        }
+        for name in ["ScreenBrief-20261111-224833.mov", "ScreenBrief-20261111-224833-2.mov", "RPReplay_Final1731.MP4",
+                     "ScreenBrief-20261111-224833-part1.mov", "ScreenBrief-20261111-224833-partial.mov",
+                     "IMG_0412-part1of3.mov", ""] {
+            XCTAssertFalse(RecordingAlbum.isPart(fileName: name), name)
+        }
+        // A part's name is a well-formed id after the prefix, so it must be refused by name.
+        let date = ISO8601.date(from: "2026-11-11T22:41:05Z")!
+        XCTAssertEqual(AppModel.recordingID(fileName: "ScreenBrief-20261111-224833-part1of3.mov", created: date), RecordingID.make(for: date))
+        XCTAssertEqual(AppModel.recordingID(fileName: "ScreenBrief-20261111-224833.mov", created: date), "20261111-224833")
+        XCTAssertEqual(AppModel.recordingID(fileName: "ScreenBrief-20261111-224833-2.mov", created: date), "20261111-224833-2")
+    }
+
+    /// A list other tasks add to.
+    private final class Log: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _lines: [String] = []
+        var lines: [String] { lock.lock(); defer { lock.unlock() }; return _lines }
+        func add(_ line: String) { lock.lock(); _lines.append(line); lock.unlock() }
+    }
+
+    @MainActor
+    private func wait(upTo seconds: Double = 30, until done: () -> Bool) async throws {
+        let began = Date()
+        while !done(), Date().timeIntervalSince(began) < seconds {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// A splitter that writes three small files named as parts, eight minutes apart.
+    private static func threeParts(_ id: String, _ directory: URL) throws -> [MovieSplitter.Part] {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return try (1...3).map { k in
+            let url = directory.appendingPathComponent(RecordingAlbum.partTitle(id: id, part: k, of: 3) + ".mov")
+            try Data([UInt8(k)]).write(to: url)
+            return MovieSplitter.Part(url: url, offsetSec: Double(k - 1) * 480, bytes: 1)
+        }
+    }
+
+    private func tooLargeOnDisk(_ files: RecordingFiles) throws -> Recording {
+        var r = pendingRecording("20261111-224105", duration: 1300)
+        r.sizeBytes = 161_300_000
+        try Data([0]).write(to: files.movie(r))
+        try files.save(r)
+        return r
+    }
+
+    /// At launch a too-large recording goes pending, running, done, with its parts saved in
+    /// order; transcription does not wait for it, and it is not split a second time.
+    @MainActor
+    func testTooLargeRecordingIsSplitAndSavedAsParts() async throws {
+        let files = scratchFiles()
+        let r = try tooLargeOnDisk(files)
+        let probe = Probe()
+        let saved = Log()
+        let model = AppModel(files: files, transcribe: { _, _ in
+            Transcriber.Result(phrases: [.init(t: 1, text: "ok")], engine: "stub", noVoice: false, peakLevel: 0.5)
+        }, split: { movie, id, directory in
+            probe.start(movie.lastPathComponent)
+            while !probe.released { try? await Task.sleep(nanoseconds: 10_000_000) }
+            return try Self.threeParts(id, directory)
+        }, savePart: { url, name, date in
+            let onDisk = FileManager.default.fileExists(atPath: url.path) && url.lastPathComponent == name
+            saved.add("\(name) \(ISO8601.string(from: date))\(onDisk ? "" : " (no file)")")
+            return .init(localIdentifier: name, inAlbum: true)
+        })
+        defer { probe.release() }
+        func now() -> Recording? { model.recordings.first { $0.id == r.id } }
+
+        model.loadSaved()
+        XCTAssertNil(now()?.partsStatus)
+        model.resumeUnfinished()
+        XCTAssertEqual(now()?.partsStatus, .pending)
+        XCTAssertEqual(now().flatMap(AttachmentAdvice.row), "Splitting into parts to attach…")
+
+        try await wait { now()?.partsStatus == .running && now()?.transcriptStatus == .done && !probe.started.isEmpty }
+        XCTAssertEqual(now()?.partsStatus, .running)
+        XCTAssertEqual(now()?.transcriptStatus, .done, "transcription does not wait for the parts")
+        XCTAssertEqual(probe.started, ["20261111-224105.mov"])
+        XCTAssertEqual(files.loadAll().first?.partsStatus, .running)
+        XCTAssertNil(now()?.attachableParts)
+
+        probe.release()
+        try await wait { now()?.partsStatus == .done }
+        XCTAssertEqual(now()?.partsStatus, .done)
+        XCTAssertEqual(now()?.partCount, 3)
+        XCTAssertNil(now()?.partsNote)
+        XCTAssertEqual(saved.lines, [
+            "ScreenBrief-20261111-224105-part1of3.mov 2026-11-11T22:41:05.000Z",
+            "ScreenBrief-20261111-224105-part2of3.mov 2026-11-11T22:49:05.000Z",
+            "ScreenBrief-20261111-224105-part3of3.mov 2026-11-11T22:57:05.000Z",
+        ], "each part under its own name, dated by its place in the recording")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: files.parts.appendingPathComponent(r.id).path), "the part files are gone once Photos has them")
+        XCTAssertEqual(try names(in: files), ["20261111-224105.json", "20261111-224105.mov"], "no part ever sits among the recordings")
+        XCTAssertEqual(now().flatMap(AttachmentAdvice.row), "Attach as 3 parts")
+        XCTAssertTrue(now().map { Brief.text(for: $0) }?.contains("attached to this thread as 3 parts (ScreenBrief-20261111-224105-part1of3 to part3of3)") ?? false)
+        XCTAssertEqual(files.loadAll().first?.attachableParts, 3)
+
+        // Done is done: neither asking again nor the next launch splits it again.
+        model.enqueueSplit(r.id)
+        model.resumeUnfinished()
+        let relaunched = AppModel(files: files, split: { _, _, _ in probe.start("again"); return [] })
+        relaunched.loadSaved()
+        relaunched.resumeUnfinished()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(probe.started, ["20261111-224105.mov"])
+        XCTAssertEqual(saved.lines.count, 3)
+        XCTAssertEqual(relaunched.recordings.first?.partsStatus, .done)
+    }
+
+    /// Photos refuses the second part: the recording is marked failed with the reason, the part
+    /// files are removed, and it reads and copies as a too-large recording did before. The next
+    /// launch tries again.
+    @MainActor
+    func testFailedSaveLeavesTheRecordingUsable() async throws {
+        let files = scratchFiles()
+        let r = try tooLargeOnDisk(files)
+        let saved = Log()
+        let model = AppModel(files: files, transcribe: { _, _ in
+            Transcriber.Result(phrases: [.init(t: 1, text: "ok")], engine: "stub", noVoice: false, peakLevel: 0.5)
+        }, split: { _, id, directory in try Self.threeParts(id, directory) }, savePart: { _, name, _ in
+            saved.add(name)
+            if saved.lines.count == 2 { throw WriterError("Photos is full") }
+            return .init(localIdentifier: name, inAlbum: true)
+        })
+        func now() -> Recording? { model.recordings.first { $0.id == r.id } }
+        model.loadSaved()
+        model.resumeUnfinished()
+        try await wait { now()?.partsStatus == .failed && now()?.transcriptStatus == .done }
+
+        let failed = try XCTUnwrap(now())
+        XCTAssertEqual(failed.partsStatus, .failed)
+        XCTAssertEqual(failed.partsNote, "Photos is full")
+        XCTAssertNil(failed.partCount)
+        XCTAssertNil(failed.attachableParts)
+        XCTAssertEqual(saved.lines.count, 2, "it stops at the part that failed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: files.parts.appendingPathComponent(r.id).path), "the part files are removed")
+        XCTAssertEqual(try names(in: files), ["20261111-224105.json", "20261111-224105.mov"])
+        XCTAssertEqual(files.loadAll().first?.partsStatus, .failed)
+
+        var asBefore = failed
+        asBefore.partsStatus = nil
+        asBefore.partsNote = nil
+        XCTAssertEqual(Brief.text(for: failed), Brief.text(for: asBefore), "Copy gives the brief of a recording that cannot be attached")
+        XCTAssertTrue(Brief.text(for: failed).contains("so it is not attached to this thread"))
+        XCTAssertTrue(Brief.text(for: failed).contains("[00:01] ok"))
+        XCTAssertEqual(AttachmentAdvice.row(for: failed), "Too large to attach in T3 Code")
+        XCTAssertEqual(AttachmentAdvice.detail(for: failed), AttachmentAdvice.detail(for: asBefore))
+
+        let relaunched = AppModel(files: files, split: { _, id, directory in try Self.threeParts(id, directory) },
+                                  savePart: { _, name, _ in .init(localIdentifier: name, inAlbum: true) })
+        relaunched.loadSaved()
+        relaunched.resumeUnfinished()
+        try await wait { relaunched.recordings.first?.partsStatus == .done }
+        XCTAssertEqual(relaunched.recordings.first?.attachableParts, 3)
+    }
+
+    /// A splitter that fails (or makes no parts) ends the same way, and one that fits is left alone.
+    @MainActor
+    func testSplitterFailureAndRecordingsThatFit() async throws {
+        let files = scratchFiles()
+        let r = try tooLargeOnDisk(files)
+        var small = pendingRecording("20261111-230000")
+        small.sizeBytes = 30_000_000
+        try Data([0]).write(to: files.movie(small))
+        try files.save(small)
+        let asked = Log()
+        let model = AppModel(files: files, split: { movie, _, _ in asked.add(movie.lastPathComponent); return [] },
+                             savePart: { _, name, _ in XCTFail("nothing to save"); return .init(localIdentifier: name, inAlbum: true) })
+        model.loadSaved()
+        model.enqueueSplit(small.id)
+        model.enqueueSplit(r.id)
+        model.enqueueSplit(r.id)
+        try await wait { model.recordings.first { $0.id == r.id }?.partsStatus == .failed }
+        XCTAssertEqual(asked.lines, ["20261111-224105.mov"], "only the too-large one, once")
+        XCTAssertEqual(model.recordings.first { $0.id == r.id }?.partsNote, "The video was not split into parts.")
+        XCTAssertNil(model.recordings.first { $0.id == small.id }?.partsStatus)
     }
 
     // MARK: Diagnostics
@@ -288,7 +567,8 @@ final class BriefTests: XCTestCase {
 
     private func scratchFiles() -> RecordingFiles {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("files-\(UUID().uuidString)")
-        let files = RecordingFiles(documents: root.appendingPathComponent("Documents"), support: root.appendingPathComponent("Support"))
+        let files = RecordingFiles(documents: root.appendingPathComponent("Documents"), support: root.appendingPathComponent("Support"),
+                                   parts: root.appendingPathComponent("Caches/Parts"))
         files.prepare()
         return files
     }
