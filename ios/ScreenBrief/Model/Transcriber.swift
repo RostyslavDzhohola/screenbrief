@@ -92,6 +92,13 @@ enum Transcriber {
         var errorDescription: String? { message }
     }
 
+    typealias Work = @Sendable (_ movie: URL, _ workDirectory: URL) async throws -> Result
+
+    static let timedOutNote = "Transcription timed out on the phone. screenbrief pull transcribes it on the Mac."
+
+    /// Seconds one transcription may take before the app gives up on it and moves on.
+    static func deadline(forDuration seconds: Double) -> TimeInterval { max(120, 3 * seconds) }
+
     static func requestAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
         if SFSpeechRecognizer.authorizationStatus() != .notDetermined { return SFSpeechRecognizer.authorizationStatus() }
         return await withCheckedContinuation { c in SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) } }
@@ -105,6 +112,7 @@ enum Transcriber {
             return Result(phrases: [], engine: "none", noVoice: true, peakLevel: 0)
         }
         if peak < 0.0005 { return Result(phrases: [], engine: "none", noVoice: true, peakLevel: peak) }
+        try Task.checkCancellation()
 
         var errors: [String] = []
         if #available(iOS 26.0, *) {
@@ -115,6 +123,8 @@ enum Transcriber {
                 errors.append("SpeechAnalyzer: \(error.localizedDescription)")
             }
         }
+        // Cancelled (its deadline passed): do not start over with the other engine.
+        try Task.checkCancellation()
         do {
             let words = try await RecognizerEngine.words(audioURL: audioURL)
             return Result(phrases: PhraseGrouper.group(words), engine: "SFSpeechRecognizer", noVoice: false, peakLevel: peak)
@@ -122,6 +132,46 @@ enum Transcriber {
             errors.append("SFSpeechRecognizer: \(error.localizedDescription)")
         }
         throw Failure(message: errors.joined(separator: "; "))
+    }
+}
+
+/// A time limit for work that may never complete.
+enum Deadline {
+    struct TimedOut: Error {}
+
+    /// The result of `work`, or `TimedOut` once `seconds` have passed. `work` is then cancelled
+    /// but not waited for, so work that ignores cancellation cannot hold the caller up.
+    static func run<T: Sendable>(seconds: TimeInterval, priority: TaskPriority? = nil,
+                                 _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+        let job = Task.detached(priority: priority, operation: work)
+        let answered = Once()
+        return try await withCheckedThrowingContinuation { c in
+            let timer = Task.detached {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                if !Task.isCancelled, answered.claim() {
+                    job.cancel()
+                    c.resume(throwing: TimedOut())
+                }
+            }
+            Task.detached {
+                let result = await job.result
+                timer.cancel()
+                if answered.claim() { c.resume(with: result) }
+            }
+        }
+    }
+
+    /// True for the first caller only.
+    private final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if claimed { return false }
+            claimed = true
+            return true
+        }
     }
 }
 
@@ -150,6 +200,10 @@ enum AudioExtractor {
         let file = try AVAudioFile(forWriting: output, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
         var peak: Float = 0
         while let sample = out.copyNextSampleBuffer() {
+            if Task.isCancelled {
+                reader.cancelReading()
+                throw CancellationError()
+            }
             let frames = CMSampleBufferGetNumSamples(sample)
             guard frames > 0, let block = CMSampleBufferGetDataBuffer(sample),
                   let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { continue }
@@ -194,12 +248,20 @@ private enum AnalyzerEngine {
             return words
         }
         let file = try AVAudioFile(forReading: audioURL)
-        if let last = try await analyzer.analyzeSequence(from: file) {
-            try await analyzer.finalizeAndFinish(through: last)
-        } else {
-            await analyzer.cancelAndFinishNow()
+        return try await withTaskCancellationHandler {
+            if let last = try await analyzer.analyzeSequence(from: file) {
+                try await analyzer.finalizeAndFinish(through: last)
+            } else {
+                await analyzer.cancelAndFinishNow()
+            }
+            let words = try await collector.value
+            try Task.checkCancellation()
+            return words
+        } onCancel: {
+            // Ends the analysis, and with it the results the collector is waiting for.
+            collector.cancel()
+            Task { await analyzer.cancelAndFinishNow() }
         }
-        return try await collector.value
     }
 }
 
@@ -215,22 +277,71 @@ private enum RecognizerEngine {
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = false
         request.addsPunctuation = true
-        return try await withCheckedThrowingContinuation { c in
-            var resumed = false
-            _ = recognizer.recognitionTask(with: request) { result, error in
-                guard !resumed else { return }
-                if let result, result.isFinal {
-                    resumed = true
-                    c.resume(returning: result.bestTranscription.segments.map {
-                        TimedWord(start: $0.timestamp, end: $0.timestamp + $0.duration, text: $0.substring)
-                    })
-                } else if let error {
-                    resumed = true
-                    // "No speech detected" is not a failure: there is just nothing to show.
-                    let ns = error as NSError
-                    if ns.domain == "kAFAssistantErrorDomain", ns.code == 1110 { c.resume(returning: []) } else { c.resume(throwing: error) }
+        let recognition = Recognition()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { c in
+                recognition.begin(c) {
+                    recognizer.recognitionTask(with: request) { result, error in
+                        if let result, result.isFinal {
+                            recognition.resume(with: .success(result.bestTranscription.segments.map {
+                                TimedWord(start: $0.timestamp, end: $0.timestamp + $0.duration, text: $0.substring)
+                            }))
+                        } else if let error {
+                            // "No speech detected" is not a failure: there is just nothing to show.
+                            let ns = error as NSError
+                            let nothingSaid = ns.domain == "kAFAssistantErrorDomain" && ns.code == 1110
+                            recognition.resume(with: nothingSaid ? .success([]) : .failure(error))
+                        }
+                    }
                 }
             }
+        } onCancel: {
+            recognition.cancel()
+        }
+    }
+
+    /// One recognition: its task and the caller waiting for it. The recogniser's callback and a
+    /// cancellation arrive on different threads; whichever comes first answers the caller.
+    private final class Recognition: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<[TimedWord], Error>?
+        private var task: SFSpeechRecognitionTask?
+        private var cancelled = false
+
+        func begin(_ c: CheckedContinuation<[TimedWord], Error>, start: () -> SFSpeechRecognitionTask) {
+            lock.lock()
+            if cancelled {
+                lock.unlock()
+                c.resume(throwing: CancellationError())
+                return
+            }
+            continuation = c
+            lock.unlock()
+            let started = start()
+            lock.lock()
+            task = started
+            let cancelledMeanwhile = cancelled
+            lock.unlock()
+            if cancelledMeanwhile { started.cancel() }
+        }
+
+        /// Only the first answer reaches the caller.
+        func resume(with result: Swift.Result<[TimedWord], Error>) {
+            lock.lock()
+            let c = continuation
+            continuation = nil
+            lock.unlock()
+            c?.resume(with: result)
+        }
+
+        /// Stops the recogniser and answers the caller now, in case the recogniser never calls back.
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let running = task
+            lock.unlock()
+            running?.cancel()
+            resume(with: .failure(CancellationError()))
         }
     }
 }

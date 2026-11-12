@@ -56,7 +56,10 @@ final class BroadcastRecorder {
         let ext = writerConfiguration.fileType == .mp4 ? "mp4" : "mov"
         fileName = "\(RecordingAlbum.filePrefix)\(id).\(ext)"
         fileURL = directory.appendingPathComponent(fileName)
-        writer = MovieWriter(outputURL: fileURL, configuration: writerConfiguration)
+        // The id travels inside the movie too: the Mac matches an attached video on this title.
+        var configuration = writerConfiguration
+        configuration.title = "\(RecordingAlbum.filePrefix)\(id)"
+        writer = MovieWriter(outputURL: fileURL, configuration: configuration)
         self.saver = saver
         self.access = access
         diagnostics = BroadcastDiagnostics(recordingId: id, startedAt: startedAt, updatedAt: startedAt, phase: "started")
@@ -144,17 +147,38 @@ final class BroadcastRecorder {
         }
     }
 
-    /// Movies an earlier broadcast left behind (the extension was killed before saving):
-    /// saves each to Photos and deletes it. Returns how many were saved.
+    /// A leftover that still cannot be saved after this long is dropped, so one cannot pile up forever.
+    static let leftoverMaxAge: TimeInterval = 7 * 24 * 3600
+
+    /// Movies an earlier broadcast left behind (the extension was killed before saving, or saving
+    /// failed): saves each to Photos and deletes it. One that cannot be saved stays for the next
+    /// broadcast to try again, until it is `leftoverMaxAge` old. Returns how many were saved.
     @discardableResult
     func recoverLeftovers() -> Int {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.creationDateKey])) ?? []
         var saved = 0
         for url in files where url != fileURL && url.lastPathComponent.hasPrefix(RecordingAlbum.filePrefix) {
             let date = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
-            if Self.fileSize(url) > 0, (try? saver(url, url.lastPathComponent, date)) != nil { saved += 1 }
-            try? FileManager.default.removeItem(at: url)
-            update(force: true) { $0.note("leftover \(url.lastPathComponent): \(saved > 0 ? "saved" : "dropped")") }
+            let outcome: String
+            if Self.fileSize(url) == 0 {
+                try? FileManager.default.removeItem(at: url)
+                outcome = "dropped (empty)"
+            } else {
+                do {
+                    _ = try saver(url, url.lastPathComponent, date)
+                    try? FileManager.default.removeItem(at: url)
+                    saved += 1
+                    outcome = "saved"
+                } catch {
+                    if Date().timeIntervalSince(date) > Self.leftoverMaxAge {
+                        try? FileManager.default.removeItem(at: url)
+                        outcome = "dropped (too old; save failed: \(error.localizedDescription))"
+                    } else {
+                        outcome = "kept (save failed: \(error.localizedDescription))"
+                    }
+                }
+            }
+            update(force: true) { $0.note("leftover \(url.lastPathComponent): \(outcome)") }
         }
         return saved
     }

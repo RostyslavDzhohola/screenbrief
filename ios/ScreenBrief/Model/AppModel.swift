@@ -26,8 +26,16 @@ final class AppModel {
     private var transcribing = false
     private var started = false
 
-    init(files: RecordingFiles = .standard) {
+    /// The transcription itself and its time limit; injectable for tests.
+    private let transcribe: Transcriber.Work
+    private let transcriptionDeadline: (_ durationSec: Double) -> TimeInterval
+
+    init(files: RecordingFiles = .standard,
+         transcribe: @escaping Transcriber.Work = { try await Transcriber.transcribe(movie: $0, workDirectory: $1) },
+         transcriptionDeadline: @escaping (_ durationSec: Double) -> TimeInterval = Transcriber.deadline(forDuration:)) {
         self.files = files
+        self.transcribe = transcribe
+        self.transcriptionDeadline = transcriptionDeadline
     }
 
     var canReadPhotos: Bool { RecordingAlbum.canAdd(photosStatus) }
@@ -35,9 +43,7 @@ final class AppModel {
     func start() async {
         guard !started else { return }
         started = true
-        files.prepare()
-        files.removeLeftoverMarkImages()
-        recordings = files.loadAll()
+        loadSaved()
         NotificationCenter.default.addObserver(forName: UIScreen.capturedDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.updateCapture()
@@ -56,6 +62,14 @@ final class AppModel {
         // Anything a previous launch left half done.
         for r in recordings where r.transcriptStatus == .pending || r.transcriptStatus == .running { enqueueTranscription(r.id) }
         await refresh()
+    }
+
+    /// The recordings already on disk, after clearing out what earlier launches left behind.
+    func loadSaved() {
+        files.prepare()
+        files.removeLeftoverMarkImages()
+        files.removeStalePartials()
+        recordings = files.loadAll()
     }
 
     func refresh() async {
@@ -167,10 +181,12 @@ final class AppModel {
             let movie = files.movie(r)
             let work = files.work
             let began = Date()
+            let transcribe = transcribe
             do {
-                let result = try await Task.detached(priority: .utility) {
-                    try await Transcriber.transcribe(movie: movie, workDirectory: work)
-                }.value
+                // Bounded: a transcription that never completes must not hold up the ones behind it.
+                let result = try await Deadline.run(seconds: transcriptionDeadline(r.durationSec), priority: .utility) {
+                    try await transcribe(movie, work)
+                }
                 update(id) {
                     $0.transcript = result.phrases
                     $0.hasMicAudio = !result.noVoice
@@ -178,6 +194,11 @@ final class AppModel {
                     $0.transcriptStatus = .done
                     $0.transcribeSec = (Date().timeIntervalSince(began) * 10).rounded() / 10
                     $0.transcriptNote = result.noVoice ? nil : "on-device (\(result.engine), took \(Format.spokenLength(Date().timeIntervalSince(began))))"
+                }
+            } catch is Deadline.TimedOut {
+                update(id) {
+                    $0.transcriptStatus = .failed
+                    $0.transcriptNote = Transcriber.timedOutNote
                 }
             } catch {
                 update(id) {

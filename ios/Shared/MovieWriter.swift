@@ -51,6 +51,8 @@ final class MovieWriter {
         var pumpInterval: Double = 0.05
         /// Most output-size frames alive at once (held, last frame, and those the encoder still has).
         var ownedFrameLimit: Int = 6
+        /// Written into the movie's metadata as its title; nil writes none.
+        var title: String?
 
         /// Bytes a second the movie grows by when the encoder uses its whole budget (it uses less
         /// on a still screen), with 3% added for the container.
@@ -255,8 +257,9 @@ final class MovieWriter {
 
         let done = DispatchSemaphore(value: 0)
         writer.finishWriting { done.signal() }
+        // On a timeout the writer is left alone: `cancelWriting` would delete the file, and a
+        // fragmented movie is readable up to its last fragment as it is on disk.
         let timedOut = done.wait(timeout: .now() + timeout) == .timedOut
-        if timedOut { writer.cancelWriting() }
 
         lock.lock(); defer { lock.unlock() }
         if timedOut {
@@ -485,6 +488,8 @@ final class MovieWriter {
         if let interval = configuration.fragmentInterval {
             writer.movieFragmentInterval = CMTime(seconds: interval, preferredTimescale: 600)
         }
+        // Must be set before `startWriting`.
+        if let title = configuration.title { writer.metadata = Self.titleMetadata(title, fileType: configuration.fileType) }
 
         let video = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -557,6 +562,22 @@ final class MovieWriter {
     }
 
     // MARK: Pure helpers
+
+    /// The title as metadata items for the writer: under the common key, and in a QuickTime movie
+    /// also as QuickTime metadata and user data, so that AVFoundation and ffprobe both show it.
+    /// (In an MP4 the common key becomes the ISO `titl` atom, which AVFoundation reads back but
+    /// ffprobe does not list; the writer does not put iTunes metadata in an .mp4.)
+    static func titleMetadata(_ title: String, fileType: AVFileType) -> [AVMetadataItem] {
+        var identifiers: [AVMetadataIdentifier] = [.commonIdentifierTitle]
+        if fileType == .mov { identifiers += [.quickTimeMetadataTitle, .quickTimeUserDataFullName] }
+        return identifiers.map { identifier in
+            let item = AVMutableMetadataItem()
+            item.identifier = identifier
+            item.value = title as NSString
+            item.extendedLanguageTag = "und"
+            return item
+        }
+    }
 
     /// Longer side at most `maxLongSide`, aspect kept, both sides even, never upscaled.
     static func outputSize(width: Int, height: Int, maxLongSide: Int) -> (width: Int, height: Int) {

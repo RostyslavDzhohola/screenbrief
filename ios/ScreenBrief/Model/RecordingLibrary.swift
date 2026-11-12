@@ -57,6 +57,34 @@ struct RecordingFiles {
         }
     }
 
+    /// The extension a movie carries while it is being copied out of Photos. The Mac lists
+    /// `recordings` and takes any file ending .mov/.mp4/.m4v, so a copy in progress must not
+    /// end in one of those (or in .json).
+    static let partialExtension = "part"
+
+    /// Has `write` fill `<name>.part` next to `url`, then moves it into place. `url` only ever
+    /// holds a complete file, and nothing is left behind when `write` throws.
+    static func writeThenMove(to url: URL, _ write: (URL) async throws -> Void) async throws {
+        let partial = url.appendingPathExtension(partialExtension)
+        try? FileManager.default.removeItem(at: partial)
+        do {
+            try await write(partial)
+            try? FileManager.default.removeItem(at: url)
+            try FileManager.default.moveItem(at: partial, to: url)
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
+            throw error
+        }
+    }
+
+    /// Deletes `*.part` files: copies out of Photos that an earlier launch did not finish.
+    func removeStalePartials() {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: recordings.path)) ?? []
+        for name in names where (name as NSString).pathExtension == Self.partialExtension {
+            try? FileManager.default.removeItem(at: recordings.appendingPathComponent(name))
+        }
+    }
+
     func dismissed() -> Set<String> {
         (try? JSONDecoder().decode(Set<String>.self, from: Data(contentsOf: dismissedFile))) ?? []
     }
@@ -117,16 +145,17 @@ enum PhotoSource {
         return (resources.first { $0.type == .video } ?? resources.first)?.originalFilename ?? ""
     }
 
-    /// Writes the asset's original video file to `url`.
+    /// Writes the asset's original video file to `url` (under a temporary name until it is complete).
     static func export(_ asset: PHAsset, to url: URL) async throws {
         let resources = PHAssetResource.assetResources(for: asset)
         guard let resource = resources.first(where: { $0.type == .video }) ?? resources.first(where: { $0.type == .fullSizeVideo }) else {
             throw Transcriber.Failure(message: "The video has no file in Photos.")
         }
-        try? FileManager.default.removeItem(at: url)
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
-        try await PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options)
+        try await RecordingFiles.writeThenMove(to: url) { partial in
+            try await PHAssetResourceManager.default().writeData(for: resource, toFile: partial, options: options)
+        }
     }
 }
 

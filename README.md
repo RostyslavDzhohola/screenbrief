@@ -55,8 +55,9 @@ flowchart LR
   for the video in two places:
   - on the iPhone, through the developer pairing Xcode already has with it (phone unlocked, on the same
     Wi-Fi as the Mac or plugged in);
-  - among the files attached in T3 Code (`~/.t3/userdata/attachments`), matched by the recording's
-    start time, which is also its id.
+  - among the files attached in T3 Code (`~/.t3/userdata/attachments`), matched by the title the
+    recorder writes into each movie (`ScreenBrief-<id>`), or for older recordings by the start time,
+    which is also the id.
 
   It then transcribes with whisper.cpp, picks the frames that matter (the start of each spoken phrase,
   each screen change, each touch mark) and writes a bundle to `~/ScreenBrief/recordings/phone-<id>/`

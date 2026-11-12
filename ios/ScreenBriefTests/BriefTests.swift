@@ -284,6 +284,207 @@ final class BriefTests: XCTestCase {
         XCTAssertEqual(left, ["20261111-224105.json", "20261111-224105.mov"])
     }
 
+    // MARK: Copies out of Photos
+
+    private func scratchFiles() -> RecordingFiles {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("files-\(UUID().uuidString)")
+        let files = RecordingFiles(documents: root.appendingPathComponent("Documents"), support: root.appendingPathComponent("Support"))
+        files.prepare()
+        return files
+    }
+
+    private func names(in files: RecordingFiles) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: files.recordings.path).sorted()
+    }
+
+    /// While a movie is being copied, the folder holds no file the Mac would take for a recording.
+    func testACopyInProgressIsNotVisibleAsAMovie() async throws {
+        let files = scratchFiles()
+        let movie = files.recordings.appendingPathComponent("20261111-224105.mov")
+        var during: [String] = []
+        try await RecordingFiles.writeThenMove(to: movie) { partial in
+            try Data([1, 2, 3]).write(to: partial)
+            during = try self.names(in: files)
+        }
+        XCTAssertEqual(during, ["20261111-224105.mov.part"])
+        for name in during {
+            XCTAssertNil(name.range(of: "\\.(mp4|mov|m4v|json)$", options: [.regularExpression, .caseInsensitive]), name)
+        }
+        XCTAssertEqual(try names(in: files), ["20261111-224105.mov"])
+        XCTAssertEqual(try Data(contentsOf: movie), Data([1, 2, 3]))
+    }
+
+    func testAFailedCopyLeavesNothingBehind() async throws {
+        let files = scratchFiles()
+        let movie = files.recordings.appendingPathComponent("20261111-224105.mov")
+        do {
+            try await RecordingFiles.writeThenMove(to: movie) { partial in
+                try Data([1, 2, 3]).write(to: partial)
+                throw Transcriber.Failure(message: "iCloud download failed")
+            }
+            XCTFail("the error must reach the caller")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "iCloud download failed")
+        }
+        XCTAssertEqual(try names(in: files), [])
+    }
+
+    func testACopyReplacesAnEarlierFileAndAnEarlierPartial() async throws {
+        let files = scratchFiles()
+        let movie = files.recordings.appendingPathComponent("20261111-224105.mov")
+        try Data([9]).write(to: movie)
+        try Data([9, 9]).write(to: movie.appendingPathExtension("part"))
+        try await RecordingFiles.writeThenMove(to: movie) { try Data([1, 2, 3]).write(to: $0) }
+        XCTAssertEqual(try names(in: files), ["20261111-224105.mov"])
+        XCTAssertEqual(try Data(contentsOf: movie), Data([1, 2, 3]))
+    }
+
+    func testStalePartialCopiesAreDeleted() throws {
+        let files = scratchFiles()
+        let r = recording()
+        try Data([0]).write(to: files.movie(r))
+        try files.save(r)
+        for name in ["20261111-224105.mov.part", "20261110-101010.mp4.part"] {
+            try Data([0]).write(to: files.recordings.appendingPathComponent(name))
+        }
+        files.removeStalePartials()
+        XCTAssertEqual(try names(in: files), ["20261111-224105.json", "20261111-224105.mov"])
+    }
+
+    @MainActor
+    func testLaunchClearsStalePartialCopies() throws {
+        let files = scratchFiles()
+        let r = recording()
+        try Data([0]).write(to: files.movie(r))
+        try files.save(r)
+        try Data([0]).write(to: files.recordings.appendingPathComponent("20261110-101010.mov.part"))
+        let model = AppModel(files: files)
+        model.loadSaved()
+        XCTAssertEqual(try names(in: files), ["20261111-224105.json", "20261111-224105.mov"])
+        XCTAssertEqual(model.recordings, [r])
+    }
+
+    // MARK: Transcription deadline
+
+    func testTranscriptionDeadlineIsThreeTimesTheLengthAndAtLeastTwoMinutes() {
+        XCTAssertEqual(Transcriber.deadline(forDuration: 0), 120)
+        XCTAssertEqual(Transcriber.deadline(forDuration: 40), 120)
+        XCTAssertEqual(Transcriber.deadline(forDuration: 41), 123)
+        XCTAssertEqual(Transcriber.deadline(forDuration: 480), 1440)
+    }
+
+    func testDeadlineReturnsTheResultOfWorkThatFinishesInTime() async throws {
+        let value = try await Deadline.run(seconds: 5) { 7 }
+        XCTAssertEqual(value, 7)
+        do {
+            _ = try await Deadline.run(seconds: 5) { () -> Int in throw Transcriber.Failure(message: "no") }
+            XCTFail("the work's error must reach the caller")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "no")
+        }
+    }
+
+    /// What a stubbed transcription saw, shared with the test across tasks.
+    private final class Probe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _started: [String] = []
+        private var _cancelled = false
+        private var _release = false
+        var started: [String] { lock.lock(); defer { lock.unlock() }; return _started }
+        var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
+        var released: Bool { lock.lock(); defer { lock.unlock() }; return _release }
+        func start(_ name: String) { lock.lock(); _started.append(name); lock.unlock() }
+        func sawCancel() { lock.lock(); _cancelled = true; lock.unlock() }
+        func release() { lock.lock(); _release = true; lock.unlock() }
+    }
+
+    func testDeadlineCancelsWorkThatRunsOverAndDoesNotWaitForIt() async throws {
+        let probe = Probe()
+        let began = Date()
+        do {
+            // Work that notices the cancellation and still refuses to stop.
+            _ = try await Deadline.run(seconds: 0.2) { () -> Int in
+                while !probe.released {
+                    if Task.isCancelled { probe.sawCancel() }
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+                return 1
+            }
+            XCTFail("must time out")
+        } catch {
+            XCTAssertTrue(error is Deadline.TimedOut, "\(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(began), 3)
+        for _ in 0..<100 where !probe.cancelled { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(probe.cancelled, "the work is told to stop")
+        probe.release()
+    }
+
+    private func pendingRecording(_ id: String, duration: Double = 15.4) -> Recording {
+        Recording(id: id, startedAt: ISO8601.date(from: "2026-11-11T22:41:05Z")!, durationSec: duration,
+                  device: DeviceDescription(name: "iPhone", model: "iPhone14,3", os: "iOS 27.0.1"),
+                  hasMicAudio: nil, transcript: nil, file: "\(id).mov", source: "screenbrief",
+                  assetId: "A/L0/\(id)", sizeBytes: 1, transcriptStatus: .pending)
+    }
+
+    /// A transcription that never completes (and ignores cancellation) is marked failed once its
+    /// deadline passes, and the recording queued behind it is still transcribed.
+    @MainActor
+    func testStalledTranscriptionFailsAndTheNextRecordingIsStillTranscribed() async throws {
+        let files = scratchFiles()
+        let stalled = pendingRecording("20261111-224105")
+        let next = pendingRecording("20261111-224300")
+        for r in [stalled, next] {
+            try Data([0]).write(to: files.movie(r))
+            try files.save(r)
+        }
+        let probe = Probe()
+        var deadlinesAskedFor: [Double] = []
+        let model = AppModel(files: files, transcribe: { movie, _ in
+            let name = movie.lastPathComponent
+            probe.start(name)
+            if name == "20261111-224105.mov" {
+                while !probe.released {
+                    if Task.isCancelled { probe.sawCancel() }
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            }
+            return Transcriber.Result(phrases: [.init(t: 1, text: "Make this button blue.")], engine: "stub", noVoice: false, peakLevel: 0.5)
+        }, transcriptionDeadline: { duration in
+            deadlinesAskedFor.append(duration)
+            return 0.3
+        })
+        defer { probe.release() }
+        model.loadSaved()
+        XCTAssertEqual(model.recordings.map(\.id), [next.id, stalled.id])
+        model.enqueueTranscription(stalled.id)
+        model.enqueueTranscription(next.id)
+
+        func status(_ id: String) -> TranscriptStatus? { model.recordings.first { $0.id == id }?.transcriptStatus }
+        let began = Date()
+        while status(next.id) != .done, Date().timeIntervalSince(began) < 10 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertEqual(probe.started, ["20261111-224105.mov", "20261111-224300.mov"], "one at a time, in order")
+        XCTAssertEqual(deadlinesAskedFor, [15.4, 15.4], "the deadline is asked for with the recording's length")
+        let failed = try XCTUnwrap(model.recordings.first { $0.id == stalled.id })
+        XCTAssertEqual(failed.transcriptStatus, .failed)
+        XCTAssertEqual(failed.transcriptNote, "Transcription timed out on the phone. screenbrief pull transcribes it on the Mac.")
+        XCTAssertNil(failed.transcript)
+        let done = try XCTUnwrap(model.recordings.first { $0.id == next.id })
+        XCTAssertEqual(done.transcriptStatus, .done)
+        XCTAssertEqual(done.transcript, [.init(t: 1, text: "Make this button blue.")])
+        XCTAssertTrue(probe.cancelled, "the stalled work was cancelled")
+        // What the Mac reads says the same.
+        XCTAssertEqual(files.loadAll().first { $0.id == stalled.id }?.transcriptStatus, .failed)
+
+        // A result that arrives after the deadline is not applied.
+        probe.release()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(status(stalled.id), .failed)
+    }
+
     func testBriefHasNoMarksBlock() {
         XCTAssertFalse(Brief.text(for: recording(transcript: [.init(t: 1, text: "ok")]), timeZone: utc).contains("Frames I marked"))
     }
