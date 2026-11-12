@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+// ScreenBrief CLI. Under launchd this file is run as `/opt/homebrew/bin/node <this file> serve`.
+import { main } from '../src/cli.mjs';
+
+main(process.argv.slice(2)).then(
+  (code) => {
+    if (typeof code === 'number') process.exitCode = code;
+  },
+  (err) => {
+    console.error(`screenbrief: ${err && err.message ? err.message : err}`);
+    process.exitCode = 1;
+  },
+);
