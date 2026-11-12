@@ -26,17 +26,6 @@ export class CommandError extends Error {
   }
 }
 
-const activeChildren = new Set();
-
-/** Kill every child process still running (used on shutdown). */
-export function killAllChildren(signal = 'SIGKILL') {
-  for (const c of activeChildren) {
-    try {
-      c.kill(signal);
-    } catch {}
-  }
-  activeChildren.clear();
-}
 
 /**
  * Run a command without a shell. Resolves { code, stdout, stderr }; rejects on spawn
@@ -52,7 +41,6 @@ export function run(cmd, args, opts = {}) {
       reject(new CommandError(`could not start ${cmd}: ${err.message}`, {}));
       return;
     }
-    activeChildren.add(child);
     const out = [];
     let outLen = 0;
     let err = '';
@@ -81,12 +69,10 @@ export function run(cmd, args, opts = {}) {
     });
     child.on('error', (e) => {
       clearTimeout(timer);
-      activeChildren.delete(child);
       reject(new CommandError(`could not start ${cmd}: ${e.message}`, { stderr: err }));
     });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      activeChildren.delete(child);
       const buf = Buffer.concat(out);
       const stdout = encoding === 'buffer' ? buf : buf.toString('utf8');
       if (timedOut) {
@@ -180,12 +166,6 @@ export async function writeJsonAtomic(file, value) {
   await fsp.rename(tmp, file);
 }
 
-export function writeJsonAtomicSync(file, value) {
-  const tmp = `${file}.${process.pid}.${crypto.randomBytes(3).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n');
-  fs.renameSync(tmp, file);
-}
-
 export function readJsonSync(file, fallback = undefined) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -201,15 +181,6 @@ export async function exists(p) {
   } catch {
     return false;
   }
-}
-
-/**
- * A path as clickable text in a T3 chat: backticked when it has no whitespace,
- * otherwise a Markdown link with %20 (T3 drops backticked paths with spaces).
- */
-export function chatPath(p) {
-  if (!/\s/.test(p)) return '`' + p + '`';
-  return `[${path.basename(p)}](${p.split('/').map((seg) => encodeURIComponent(seg).replace(/%2F/g, '/')).join('/')})`;
 }
 
 export function log(...args) {

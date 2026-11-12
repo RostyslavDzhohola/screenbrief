@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ScreenBrief CLI. Under launchd this file is run as `/opt/homebrew/bin/node <this file> serve`.
+// ScreenBrief CLI.
 import { main } from '../src/cli.mjs';
 
 main(process.argv.slice(2)).then(

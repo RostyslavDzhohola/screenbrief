@@ -27,17 +27,13 @@ export async function writeStatus(dir, status) {
   await writeJsonAtomic(path.join(dir, 'status.json'), { ...status, updatedAt: new Date().toISOString() });
 }
 
-export function readStatus(dir) {
-  return readJsonSync(path.join(dir, 'status.json'), null);
-}
-
 /**
  * Process one video into a bundle.
  * opts: { outDir, id, note, meta (phone meta), cfg, onStatus(status) }
- * Returns the bundle summary (also what loadBundle() reads back).
+ * Returns the bundle summary.
  */
 export async function processVideo(input, opts = {}) {
-  const cfg = opts.cfg || loadConfig({ create: false });
+  const cfg = opts.cfg || loadConfig();
   const tools = opts.tools || toolPaths(cfg);
   const meta = opts.meta || {};
   const id = opts.id || meta.id || randomId();
@@ -229,31 +225,4 @@ export async function processVideo(input, opts = {}) {
   } finally {
     if (rotatedInput) await fsp.rm(rotatedInput, { force: true }).catch(() => {});
   }
-}
-
-/** Read a finished bundle back from disk (for `send` and the server). */
-export function loadBundle(dir) {
-  const meta = readJsonSync(path.join(dir, 'meta.json'), null);
-  const transcript = readJsonSync(path.join(dir, 'transcript.json'), null);
-  const timeline = readJsonSync(path.join(dir, 'timeline.json'), null);
-  if (!meta || !transcript) return null;
-  return {
-    id: meta.id,
-    dir,
-    feedbackPath: path.join(dir, 'FEEDBACK.md'),
-    recordingPath: path.join(dir, 'recording.mp4'),
-    contactSheet: meta.paths && meta.paths.contactSheet,
-    durationSec: meta.durationSec,
-    width: meta.width,
-    height: meta.height,
-    recordedAt: meta.recordedAt,
-    createdAt: meta.createdAt,
-    device: meta.device,
-    note: meta.note,
-    transcript,
-    frames: (timeline && timeline.frames) || [],
-    markers: (timeline && timeline.markers) || [],
-    frameCount: meta.frameCount,
-    timings: meta.timings,
-  };
 }

@@ -1,34 +1,27 @@
-// Command-line interface: serve, process, frames, threads, send, pair, doctor,
-// install-service, uninstall-service.
+// Command-line interface: pull, process, frames, doctor.
 import { pullRecording, PullError, bundleDirFor, findAttachedVideo, idTime } from './pull.mjs';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { loadConfig, ensureDirs, tools as toolPaths, paths, CLI_PATH } from './config.mjs';
-import { processVideo, loadBundle } from './pipeline.mjs';
+import { processVideo } from './pipeline.mjs';
 import { probe, extractFrame } from './media.mjs';
-import { T3 } from './t3.mjs';
-import { deliverBundle } from './deliver.mjs';
-import { pairingInfo, qrTerminal, qrPng, createPairCode } from './net.mjs';
-import { installService, uninstallService } from './service.mjs';
 import { doctor } from './doctor.mjs';
-import { fmtTimeForName, readJsonSync, writeJsonAtomic, mapLimit } from './util.mjs';
+import { fmtTimeForName, readJsonSync, mapLimit } from './util.mjs';
 
-const HELP = `screenbrief: phone screen recordings with spoken feedback -> agent-readable bundles
+const HELP = `screenbrief: phone screen recordings with spoken feedback -> a timeline an agent can read
 
 Usage:
-  screenbrief serve [--port <n>] [--no-bonjour]
   screenbrief pull <recording id | latest> [--device <name>] [--no-phone] [--force]
-      get a recording (from the iPhone, or the video attached in T3 Code) and process it
+      get a recording (from the iPhone, or the video attached in T3 Code), process it,
+      and print the path of its FEEDBACK.md
   screenbrief process <video> [--out <dir>] [--note <text>]
-  screenbrief frames <bundle dir> --at <sec> [--at <sec> ...]
-  screenbrief frames <bundle dir> --from <sec> --to <sec> [--fps <n>]
-  screenbrief threads [--json]
-  screenbrief send <recording id | bundle dir> (--thread <id> | --project <path>) [--note <text>]
-  screenbrief pair
+      process any video file the same way
+  screenbrief frames <bundle dir | recording id> --at <sec> [--at <sec> ...]
+  screenbrief frames <bundle dir | recording id> --from <sec> --to <sec> [--fps <n>]
+      extra frames around a moment
   screenbrief doctor
-  screenbrief install-service [--dry-run]
-  screenbrief uninstall-service
+      check ffmpeg, whisper and the rest
 
 Data: ${paths().home} (override with SCREENBRIEF_HOME). CLI: ${CLI_PATH}`;
 
@@ -66,13 +59,13 @@ const num = (v, name) => {
 export function resolveBundle(ref) {
   if (!ref) throw new Error('pass a recording id or bundle directory');
   const asPath = path.resolve(ref);
-  if (fs.existsSync(path.join(asPath, 'meta.json')) || fs.existsSync(path.join(asPath, 'record.json'))) return asPath;
+  if (fs.existsSync(path.join(asPath, 'meta.json'))) return asPath;
   const root = paths().recordings;
   if (fs.existsSync(root)) {
     for (const name of fs.readdirSync(root).sort().reverse()) {
       const dir = path.join(root, name);
       if (name === ref) return dir;
-      const rec = readJsonSync(path.join(dir, 'record.json'), null) || readJsonSync(path.join(dir, 'meta.json'), null);
+      const rec = readJsonSync(path.join(dir, 'meta.json'), null);
       if (rec && rec.id === ref) return dir;
     }
   }
@@ -178,7 +171,7 @@ async function cmdPull(args) {
 
 async function cmdFrames(args) {
   const dir = resolveBundle(args._[0]);
-  const cfg = loadConfig({ create: false });
+  const cfg = loadConfig();
   const tools = toolPaths(cfg);
   const src = path.join(dir, 'recording.mp4');
   if (!fs.existsSync(src)) throw new Error(`no recording.mp4 in ${dir}`);
@@ -202,107 +195,18 @@ async function cmdFrames(args) {
   return 0;
 }
 
-async function cmdThreads(args) {
-  const cfg = loadConfig();
-  const t3 = new T3({ t3Bin: toolPaths(cfg).t3, projectPaths: cfg.projectPaths || [] });
-  const r = await t3.threads(60);
-  if (args.json) {
-    console.log(JSON.stringify({ threads: r.threads, source: r.source, ...(r.warning ? { warning: r.warning } : {}) }, null, 2));
-    return 0;
-  }
-  if (r.warning) console.error(`warning: ${r.warning}`);
-  for (const t of r.threads) console.log(`${t.threadId}  ${String(t.updatedAt).slice(0, 16).replace('T', ' ')}  [${t.projectName}]  ${t.title}`);
-  return 0;
-}
-
-async function cmdSend(args) {
-  const dir = resolveBundle(args._[0]);
-  if (!args.thread && !args.project) throw new Error('pass --thread <id> or --project <path>');
-  const cfg = loadConfig();
-  const t3 = new T3({ t3Bin: toolPaths(cfg).t3, projectPaths: cfg.projectPaths || [] });
-  if (!loadBundle(dir)) throw new Error(`${dir} is not a finished bundle (still processing or failed?)`);
-  const target = args.thread ? { threadId: String(args.thread) } : { projectPath: path.resolve(String(args.project)) };
-  if (args.note) target.note = String(args.note);
-  const delivery = await deliverBundle(t3, dir, target);
-  // Keep the server's record in step when this bundle belongs to it.
-  const recFile = path.join(dir, 'record.json');
-  const rec = readJsonSync(recFile, null);
-  if (rec) {
-    const { messagePath, ...d } = delivery;
-    rec.delivery = d;
-    rec.deliveryRequest = null;
-    await writeJsonAtomic(recFile, rec);
-  }
-  if (delivery.state !== 'sent') throw new Error(`delivery failed: ${delivery.error}`);
-  console.log(`sent to thread ${delivery.threadId}${delivery.link ? ` (${delivery.link})` : ''}`);
-  console.log(delivery.messagePath);
-  return 0;
-}
-
-async function cmdPair(args = {}) {
-  const cfg = loadConfig();
-  ensureDirs();
-  const tools = toolPaths(cfg);
-  const info = pairingInfo(cfg);
-  console.log('Pair the ScreenBrief iPhone app by scanning this code with the Camera app:\n');
-  try {
-    console.log(await qrTerminal(tools, info.link));
-  } catch (e) {
-    console.error(`(could not draw a QR code: ${e.message})`);
-  }
-  try {
-    await qrPng(tools, info.link, paths().pairPng);
-    console.log(`QR image: ${paths().pairPng}`);
-  } catch (e) {
-    console.error(`(could not write ${paths().pairPng}: ${e.message})`);
-  }
-  console.log(`\nPairing link:\n${info.link}\n`);
-  try {
-    const hours = Math.min(72, Math.max(0.1, Number(args['valid-hours']) || 0.5));
-    const { code } = createPairCode(paths().pairCodes, Date.now(), hours * 3600 * 1000);
-    console.log(`Tap-to-pair page for the phone (valid ${hours < 1 ? `${Math.round(hours * 60)} minutes` : `${hours} hours`}, safe to paste in a chat):\n${info.alt}/pair/${code}\n`);
-  } catch (e) {
-    console.error(`(could not create a tap-to-pair code: ${e.message})`);
-  }
-  console.log(`Service: ${info.url}  (LAN: ${info.alt})`);
-  console.log(`Web uploader for Safari (no app needed): ${info.webUrl}`);
-  return 0;
-}
-
 export async function main(argv) {
   const [cmd, ...rest] = argv;
-  const args = parseArgs(rest, { boolean: ['json', 'dry-run', 'no-bonjour', 'help', 'force', 'no-phone'] });
+  const args = parseArgs(rest, { boolean: ['help', 'force', 'no-phone'] });
   switch (cmd) {
-    case 'serve': {
-      const { serveForever } = await import('./server.mjs');
-      await serveForever({ port: args.port ? Number(args.port) : undefined, bonjour: !args['no-bonjour'] });
-      return new Promise(() => {}); // run until signalled
-    }
     case 'pull':
       return cmdPull(args);
     case 'process':
       return cmdProcess(args);
     case 'frames':
       return cmdFrames(args);
-    case 'threads':
-      return cmdThreads(args);
-    case 'send':
-      return cmdSend(args);
-    case 'pair':
-      return cmdPair(args);
     case 'doctor':
       return doctor();
-    case 'install-service': {
-      const r = await installService({ dryRun: !!args['dry-run'] });
-      if (r.dryRun) console.log(r.body);
-      else console.log(`installed ${r.file}; logs in ${paths().logs}`);
-      return 0;
-    }
-    case 'uninstall-service': {
-      const r = await uninstallService();
-      console.log(r.removed ? `removed ${r.file}` : `not installed (${r.file})`);
-      return 0;
-    }
     case undefined:
     case 'help':
     case '--help':

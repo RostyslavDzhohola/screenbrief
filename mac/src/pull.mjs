@@ -151,17 +151,22 @@ export function idTime(id) {
   return Number.isNaN(t.getTime()) ? null : t;
 }
 
+/** Where T3 Code keeps the files attached to threads (SCREENBRIEF_T3_ATTACHMENTS overrides). */
+export function attachmentsDir() {
+  return process.env.SCREENBRIEF_T3_ATTACHMENTS || path.join(os.homedir(), '.t3', 'userdata', 'attachments');
+}
+
 /**
  * The recording as a file the user attached in T3 Code (it stores attachments under
  * ~/.t3/userdata/attachments with generated names). The phone stamps each movie with its start
  * time, which is also its id, so the match is on that timestamp.
  */
-export async function findAttachedVideo(id, { attachmentsDir = path.join(os.homedir(), '.t3', 'userdata', 'attachments'), tools, maxAgeDays = 30, toleranceSec = 3 } = {}) {
+export async function findAttachedVideo(id, { attachmentsDir: dir = attachmentsDir(), tools, maxAgeDays = 30, toleranceSec = 3 } = {}) {
   const want = idTime(id);
   if (!want) return null;
   let names;
   try {
-    names = await fsp.readdir(attachmentsDir);
+    names = await fsp.readdir(dir);
   } catch {
     return null;
   }
@@ -169,7 +174,7 @@ export async function findAttachedVideo(id, { attachmentsDir = path.join(os.home
   const candidates = [];
   for (const n of names) {
     if (!MOVIE_RE.test(n)) continue;
-    const file = path.join(attachmentsDir, n);
+    const file = path.join(dir, n);
     try {
       const st = await fsp.stat(file);
       if (st.isFile() && st.size > 0 && st.mtimeMs >= cutoff) candidates.push({ file, mtimeMs: st.mtimeMs });
