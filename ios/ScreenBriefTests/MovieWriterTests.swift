@@ -127,6 +127,7 @@ final class MovieWriterTests: XCTestCase {
         let w = MovieWriter(outputURL: url("none.mov"))
         let first = w.finish(timeout: 1)
         XCTAssertFalse(first.finished)
+        XCTAssertFalse(first.finishTimedOut, "only a finish that ran out of time is flagged")
         XCTAssertNotNil(first.error)
         XCTAssertEqual(w.finish(timeout: 1).finished, false)
     }
@@ -140,6 +141,7 @@ final class MovieWriterTests: XCTestCase {
         feeder.feed(seconds: 3)
         let summary = w.finish(timeout: 0)
         XCTAssertFalse(summary.finished)
+        XCTAssertTrue(summary.finishTimedOut)
         XCTAssertEqual(summary.error, "Finishing the movie timed out after 0s.")
         XCTAssertGreaterThan(summary.videoFramesAppended, 30)
         XCTAssertTrue(FileManager.default.fileExists(atPath: out.path), "the movie must survive a finish timeout")
@@ -281,24 +283,57 @@ final class MovieWriterTests: XCTestCase {
         XCTAssertEqual(r.currentDiagnostics.phase, "failed")
     }
 
-    /// A finish that timed out still hands the movie (as far as it got) to Photos.
-    func testRecorderSavesTheMovieWhenFinishTimesOut() {
-        var savedBytes: Int64 = 0
-        let r = BroadcastRecorder(directory: recorderDirectory(), access: { .init(addOnly: .authorized, readWrite: .authorized) },
-                                  saver: { url, _, _ in
-                                      savedBytes = BroadcastRecorder.fileSize(url)
-                                      return .init(localIdentifier: "x", inAlbum: true)
-                                  })
+    /// After a finish that timed out the writer may still be writing: the movie is neither saved
+    /// nor deleted then. The next broadcast finds it as a leftover and saves it.
+    func testRecorderLeavesTheMovieForTheNextBroadcastWhenFinishTimesOut() async throws {
+        let dir = recorderDirectory()
+        let start = Date(timeIntervalSince1970: 1_794_000_000)
+        let r = BroadcastRecorder(directory: dir, startedAt: start,
+                                  access: { .init(addOnly: .authorized, readWrite: .authorized) },
+                                  saver: { _, _, _ in XCTFail("must not save a file its writer may still be changing"); return .init(localIdentifier: "", inAlbum: false) })
         XCTAssertNil(r.start())
         let feeder = SyntheticFeeder(video: { r.appendVideo($0) }, audio: { r.appendAudio($0) })
         feeder.feed(seconds: 3)
         let outcome = r.finish(timeout: 0)
         XCTAssertFalse(outcome.summary.finished)
-        XCTAssertEqual(outcome.summary.error, "Finishing the movie timed out after 0s.")
-        XCTAssertEqual(outcome.saved?.localIdentifier, "x")
-        XCTAssertNil(outcome.error)
-        XCTAssertGreaterThan(savedBytes, 0, "the saver was given the movie, not an empty or missing file")
-        XCTAssertEqual(r.currentDiagnostics.phase, "saved")
+        XCTAssertTrue(outcome.summary.finishTimedOut)
+        XCTAssertNil(outcome.saved)
+        XCTAssertEqual(outcome.error, "Finishing took too long. The recording will be saved to Photos the next time you start recording.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: r.fileURL.path), "the only copy of the recording stays")
+        XCTAssertGreaterThan(BroadcastRecorder.fileSize(r.fileURL), 0)
+        let after = r.currentDiagnostics
+        XCTAssertEqual(after.phase, "failed")
+        XCTAssertEqual(after.error, outcome.error)
+        XCTAssertTrue(after.events.last?.hasSuffix(outcome.error ?? "-") ?? false, "\(after.events)")
+        XCTAssertNil(after.savedAssetId)
+
+        // The writer ends in its own time (on the phone, with the extension's process).
+        for _ in 0..<200 where !r.writer.snapshot().finished { try await Task.sleep(nanoseconds: 50_000_000) }
+        XCTAssertTrue(r.writer.snapshot().finished)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: r.fileURL.path))
+
+        // The next broadcast: its own file has another name, the earlier movie is a leftover.
+        var savedName: String?
+        var savedInfo: MovieInfo?
+        let next = BroadcastRecorder(directory: dir, startedAt: start.addingTimeInterval(60),
+                                     access: { .init(addOnly: .authorized, readWrite: .authorized) },
+                                     saver: { url, name, _ in
+                                         savedName = name
+                                         let sem = DispatchSemaphore(value: 0)
+                                         Task { savedInfo = try? await MovieInfo.load(url); sem.signal() }
+                                         sem.wait()
+                                         return .init(localIdentifier: "x", inAlbum: true)
+                                     })
+        XCTAssertEqual(next.directory, r.directory)
+        XCTAssertNotEqual(next.fileURL, r.fileURL)
+        XCTAssertTrue(r.fileName.hasPrefix(RecordingAlbum.filePrefix))
+        XCTAssertEqual(next.recoverLeftovers(), 1)
+        XCTAssertEqual(savedName, r.fileName)
+        XCTAssertEqual(savedInfo?.isReadable, true)
+        XCTAssertEqual(savedInfo?.duration ?? 0, 3, accuracy: 0.3)
+        XCTAssertEqual(savedInfo?.title, "ScreenBrief-\(RecordingID.make(for: start))")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: r.fileURL.path), "removed once Photos has it")
+        XCTAssertTrue(next.currentDiagnostics.events.last?.hasSuffix("leftover \(r.fileName): saved") ?? false, "\(next.currentDiagnostics.events)")
     }
 
     private func makeLeftover(in dir: URL, bytes: Int = 100, age: TimeInterval = 0) throws -> URL {
@@ -375,23 +410,25 @@ final class MovieWriterTests: XCTestCase {
         XCTAssertTrue(r.currentDiagnostics.events.last?.hasSuffix("dropped (empty)") ?? false, "\(r.currentDiagnostics.events)")
     }
 
-    func testOldLeftoverThatCannotBeSavedIsDropped() throws {
+    /// However old it is, a recording that was never saved is kept: this file is its only copy.
+    func testOldLeftoverThatCannotBeSavedIsKept() throws {
         let dir = recorderDirectory()
-        let leftover = try makeLeftover(in: dir, age: BroadcastRecorder.leftoverMaxAge + 3600)
+        let leftover = try makeLeftover(in: dir, age: 30 * 24 * 3600)
+        var photosFull = true
         var attempts = 0
-        let r = recorder(in: dir) { _, _, _ in attempts += 1; throw WriterError("Photos is full") }
+        let r = recorder(in: dir) { _, _, _ in
+            attempts += 1
+            if photosFull { throw WriterError("Photos is full") }
+            return .init(localIdentifier: "x", inAlbum: true)
+        }
         XCTAssertEqual(r.recoverLeftovers(), 0)
-        XCTAssertEqual(attempts, 1, "it is still tried once more before it goes")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path), "an unsaveable file must not stay forever")
-        XCTAssertTrue(r.currentDiagnostics.events.last?.contains("dropped (too old; save failed: Photos is full)") ?? false, "\(r.currentDiagnostics.events)")
-    }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: leftover.path), "a recording that was not saved must not be deleted for being old")
+        XCTAssertTrue(r.currentDiagnostics.events.last?.hasSuffix("leftover ScreenBrief-20261111-200000.mov: kept (save failed: Photos is full)") ?? false,
+                      "\(r.currentDiagnostics.events)")
 
-    func testLeftoverJustUnderSevenDaysThatCannotBeSavedIsKept() throws {
-        let dir = recorderDirectory()
-        let leftover = try makeLeftover(in: dir, age: BroadcastRecorder.leftoverMaxAge - 3600)
-        XCTAssertEqual(BroadcastRecorder.leftoverMaxAge, 7 * 24 * 3600)
-        let r = recorder(in: dir) { _, _, _ in throw WriterError("Photos is full") }
-        XCTAssertEqual(r.recoverLeftovers(), 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: leftover.path))
+        photosFull = false
+        XCTAssertEqual(r.recoverLeftovers(), 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path))
     }
 }
