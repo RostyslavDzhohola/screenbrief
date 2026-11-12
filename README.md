@@ -1,63 +1,126 @@
 # ScreenBrief
 
-Record your iPhone screen while you talk, tap Copy, paste into a T3 Code thread. The agent fetches the
-video from the phone and reads it as a timeline: what you said next to screenshots of what was on screen.
+Record your iPhone screen while you talk about what you want changed, tap **Copy**, and paste into your
+coding agent's thread. The agent fetches the video and reads it as a timeline: what you said, next to
+screenshots of what was on screen at that moment.
+
+It was built for [T3 Code](https://github.com/pingdotgg/t3code) threads, for one person's use. The
+copied text is plain, so any agent that can run a command on the Mac can follow it.
+
+## Using it
+
+1. Open ScreenBrief on the iPhone and tap **Start recording**. Tap **Start Sharing** in the system sheet
+   (turn Microphone on the first time; iOS remembers it).
+2. Switch to the app you are testing. Use it and say what you want changed.
+3. Stop from the red status bar pill, or come back to ScreenBrief and tap the button again.
+4. Open the recording in ScreenBrief, check the transcript, tap **Copy**.
+5. Paste into the agent's thread. If the Mac cannot reach the phone (you are away from it), also attach
+   the video from Photos, album "ScreenBrief".
+
+The agent runs `screenbrief pull <id>`, reads the `FEEDBACK.md` it prints, opens the frames, and makes
+the changes. If it cannot get the video it is told to wait for you rather than guess from the transcript.
 
 ## How it works
 
-1. **iPhone app** (`ios/`): one record button. A broadcast extension records the screen and your voice
-   and saves the video on the phone (Photos, album "ScreenBrief"). The app lists recordings, plays them
-   back, transcribes them on the phone, and has one **Copy** button.
-2. **The copied text** holds the transcript and one instruction for the agent:
-   `screenbrief pull <id>`. Paste it in T3 Code on the phone or on the Mac. It also tells the agent to
-   wait for the video rather than work from the transcript alone.
-3. **Mac CLI** (`mac/`): `screenbrief pull` gets the video, transcribes it with whisper.cpp, picks the
-   frames that matter (each spoken phrase, each screen change, each touch mark) and writes a bundle
-   with `FEEDBACK.md`. It looks in two places:
-   - the iPhone, over the developer pairing the Mac already has with it (phone unlocked, same Wi-Fi
-     or plugged in).
-   - the videos attached in T3 Code (`~/.t3/userdata/attachments`), matched by the recording's start
-     time. This is the route when you are away from the Mac: paste the text and attach the video.
-4. **Touch overlay** (`overlays/`, optional): a debug-only component for the app you are testing that
-   draws taps, long presses and finger trails in magenta, so they show up in the recording and on the
-   timeline. iOS gives no other way to see touches in another app.
+```mermaid
+flowchart LR
+  subgraph iPhone
+    A[Record button] --> B[Broadcast extension<br/>screen + microphone<br/>H.264 + AAC .mov]
+    B --> C[Photos<br/>album ScreenBrief]
+    C --> D[App: copy into Documents,<br/>transcribe on the phone]
+    D --> E[Copy: text brief<br/>id + instructions + transcript]
+  end
+  E -- paste --> T[Agent thread]
+  C -. attach video<br/>when away .-> T
+  subgraph Mac
+    T --> P[screenbrief pull id]
+    P --> V{Get the video}
+    V -- phone reachable --> V1[devicectl copy<br/>from the app]
+    V -- otherwise --> V2[video attached<br/>to the thread]
+    V1 --> X[Transcribe with whisper.cpp,<br/>pick frames]
+    V2 --> X
+    X --> F[FEEDBACK.md<br/>+ frames + contact sheet]
+  end
+  F --> G[Agent reads it<br/>and makes the changes]
+```
 
-There is no pairing step and no service running on the Mac.
+- **iPhone app** (`ios/`). A ReplayKit broadcast upload extension records the whole screen and the
+  microphone, also while other apps are in front, and writes one fragmented QuickTime movie
+  (about 750 kbps, so about 5.6 MB a minute). When the broadcast stops it saves the movie to Photos.
+  The app notices the new video, copies it into its own `Documents/Recordings/`, transcribes it on the
+  phone, and shows a list with playback, the transcript and a **Copy** button.
+- **The copied text** (`ios/ScreenBrief/Model/Brief.swift`) holds the recording id, the instruction
+  `screenbrief pull <id>`, what to do when the video cannot be fetched, and the phone's transcript.
+- **Mac CLI** (`mac/`, Node, no dependencies beyond ffmpeg and whisper.cpp). `screenbrief pull` looks
+  for the video in two places:
+  - on the iPhone, through the developer pairing Xcode already has with it (phone unlocked, on the same
+    Wi-Fi as the Mac or plugged in);
+  - among the files attached in T3 Code (`~/.t3/userdata/attachments`), matched by the recording's
+    start time, which is also its id.
+
+  It then transcribes with whisper.cpp, picks the frames that matter (the start of each spoken phrase,
+  each screen change, each touch mark) and writes a bundle to `~/ScreenBrief/recordings/phone-<id>/`
+  with `FEEDBACK.md`, `frames/`, a contact sheet and `recording.mp4`.
+- **Touch overlay** (`overlays/`, optional). iOS does not show touches in a screen recording and does
+  not let one app see touches in another. This is a debug-only component you add to the app you are
+  testing; it draws taps, long presses and finger trails in magenta, and the Mac side turns them into
+  timeline entries.
+
+The extension and the app share no storage (there is no App Group): Photos is the hand-off, and a shared
+Keychain item carries the recorder's heartbeat and diagnostics. Nothing runs in the background on the
+Mac and there is no pairing step.
+
+## Limits
+
+- **About 8 minutes per recording when you attach the video.** T3 Code attaches files up to 50 MB.
+  A longer recording still works when the Mac can reach the phone; the app warns you and the copied
+  text says so.
+- **Portrait.** The movie's orientation is fixed by its first frame. Turning the phone to landscape
+  partway through leaves that stretch sideways.
+- **Touches are not recorded** unless the app you are testing has the overlay.
+- **Built for one phone and one Mac.** Signing is manual, with a personal team.
 
 ## Mac commands
 
 ```
-screenbrief pull <id | latest>   # get a recording (phone or T3 Code attachment), process it, print FEEDBACK.md
+screenbrief pull <id | latest>   # get a recording, process it, print the path of FEEDBACK.md
 screenbrief process <video>      # process any video file the same way
-screenbrief frames <bundle> --at 12.5        # extra frames around a moment
-screenbrief doctor               # checks ffmpeg, whisper and the rest
+screenbrief frames <bundle or id> --at 12.5     # extra frames around a moment
+screenbrief doctor               # check ffmpeg, whisper, devicectl and the attachments folder
 ```
 
-Bundles land in `~/ScreenBrief/recordings/`. The older `serve`, `pair` and `send` commands (a LAN
-service with a Safari upload page and direct delivery to a thread) still exist but nothing uses them.
+`pull` exits with status 2 and a message for the agent when it cannot get the video.
+
+Setup: Node 24, `brew install ffmpeg whisper-cpp`, a whisper model at
+`~/ScreenBrief/models/ggml-large-v3-turbo-q5_0.bin`, and `mac/bin/screenbrief` on the PATH (a symlink
+in `/opt/homebrew/bin` works). `screenbrief doctor` checks all of it.
 
 ## Rebuilding the phone app
 
 ```
 cd ios
-/tmp/xcodegen-dl/xcodegen/bin/xcodegen generate        # after editing project.yml
+xcodegen generate        # after editing project.yml
 xcodebuild build -project ScreenBrief.xcodeproj -scheme ScreenBrief \
   -destination 'generic/platform=iOS' -derivedDataPath /tmp/sb-dd-device
-xcrun devicectl device install app --device <device id from: xcrun devicectl list devices> \
+xcrun devicectl device install app --device <id from: xcrun devicectl list devices> \
   /tmp/sb-dd-device/Build/Products/Debug-iphoneos/ScreenBrief.app
 ```
 
-Signing is manual, with the profiles "ScreenBrief Dev", "ScreenBrief Broadcast Dev" and
-"ScreenBrief UITests Dev". The signing certificate expires on 2026-12-13; after that the profiles must
-be recreated with a new certificate.
+`project.yml` names the team, bundle ids and provisioning profiles ("ScreenBrief Dev",
+"ScreenBrief Broadcast Dev", "ScreenBrief UITests Dev"). To build it for another account, change
+those and the Keychain group in the two `.entitlements` files.
 
 ## Tests
 
 ```
 cd mac && npm test
 cd ios && xcodebuild test -project ScreenBrief.xcodeproj -scheme ScreenBrief \
-  -destination 'platform=iOS Simulator,name=ScreenBrief Test' -derivedDataPath /tmp/sb-dd
-# On the real phone (drives the app with UI automation; the phone must be unlocked):
+  -destination 'platform=iOS Simulator,name=<a simulator>' -derivedDataPath /tmp/sb-dd
+# On the real phone (drives the app with Xcode UI automation; the phone must be unlocked):
 cd ios && xcodebuild test -project ScreenBrief.xcodeproj -scheme ScreenBriefDevice \
   -destination 'id=<iPhone UDID>' -derivedDataPath /tmp/sb-dd-device
 ```
+
+ReplayKit does not run in the simulator, so recording itself is only tested on a real phone. One device
+test (`testFullLoopIntoT3Code`) pastes into a T3 Code thread with a specific title; read it before
+running it.
