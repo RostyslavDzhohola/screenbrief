@@ -47,6 +47,8 @@ struct Recording: Codable, Equatable, Identifiable, Hashable {
     var partCount: Int?
     /// Why the parts could not be made, if so.
     var partsNote: String?
+    /// How many times splitting it into parts was started.
+    var partsAttempts: Int?
 
     /// The largest file T3 Code attaches to a thread (50 MiB).
     static let maxAttachmentBytes: Int64 = 50 * 1_048_576
@@ -66,6 +68,14 @@ struct Recording: Codable, Equatable, Identifiable, Hashable {
 
     /// Too large, with no finished parts: they are made after import and at launch.
     var needsParts: Bool { isTooLargeToAttach && attachableParts == nil }
+
+    /// A split that failed is started again at launch this many times in all, then left alone.
+    static let maxPartsAttempts = 3
+
+    /// Its parts are made at launch: not once splitting it has failed `maxPartsAttempts` times.
+    var resumesParts: Bool {
+        needsParts && (partsStatus != .failed || (partsAttempts ?? 0) < Recording.maxPartsAttempts)
+    }
 
     var transcriptPreview: String? {
         guard let transcript, !transcript.isEmpty else { return nil }

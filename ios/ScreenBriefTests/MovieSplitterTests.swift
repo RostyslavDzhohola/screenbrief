@@ -231,6 +231,25 @@ final class MovieSplitterTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
 
+    /// A split that is cancelled writes no (further) part and leaves nothing behind.
+    func testCancelledSplitThrowsAndLeavesNothingBehind() async throws {
+        let movie = source("portrait.mov")
+        let size = BroadcastRecorder.fileSize(movie)
+        let directory = scratch()
+        let task = Task { () -> [MovieSplitter.Part] in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await MovieSplitter.split(movie: movie, id: Self.id, into: directory, targetBytes: size / 4, maxBytes: size * 2 / 5)
+        }
+        do {
+            let parts = try await task.value
+            XCTFail("a cancelled split must not return \(parts.count) parts")
+        } catch {
+            print("[split] cancelled: \(type(of: error)) \(error)")
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
     func testPartsArePlannedByFillingEachToTheTarget() {
         XCTAssertEqual(MovieSplitter.partStarts(groupBytes: [10, 10, 10, 10, 10], targetBytes: 25), [0, 2, 4])
         XCTAssertEqual(MovieSplitter.partStarts(groupBytes: [10, 10, 10, 10], targetBytes: 20), [0, 2], "exactly the target still fits")

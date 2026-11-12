@@ -180,7 +180,9 @@ final class BriefTests: XCTestCase {
         XCTAssertNil(r.partsStatus)
         XCTAssertNil(r.partCount)
         XCTAssertNil(r.partsNote)
+        XCTAssertNil(r.partsAttempts)
         XCTAssertTrue(r.needsParts, "its parts are made at the next launch")
+        XCTAssertTrue(r.resumesParts)
         XCTAssertFalse(r.isSplitting)
         XCTAssertEqual(AttachmentAdvice.row(for: r), "Too large to attach in T3 Code")
     }
@@ -231,8 +233,8 @@ final class BriefTests: XCTestCase {
         }
     }
 
-    private func tooLargeOnDisk(_ files: RecordingFiles) throws -> Recording {
-        var r = pendingRecording("20261111-224105", duration: 1300)
+    private func tooLargeOnDisk(_ files: RecordingFiles, id: String = "20261111-224105", duration: Double = 1300) throws -> Recording {
+        var r = pendingRecording(id, duration: duration)
         r.sizeBytes = 161_300_000
         try Data([0]).write(to: files.movie(r))
         try files.save(r)
@@ -369,6 +371,237 @@ final class BriefTests: XCTestCase {
         XCTAssertEqual(asked.lines, ["20261111-224105.mov"], "only the too-large one, once")
         XCTAssertEqual(model.recordings.first { $0.id == r.id }?.partsNote, "The video was not split into parts.")
         XCTAssertNil(model.recordings.first { $0.id == small.id }?.partsStatus)
+    }
+
+    // MARK: Splits that fail, are deleted, or hang
+
+    private static let transcribed: Transcriber.Work = { _, _ in
+        Transcriber.Result(phrases: [.init(t: 1, text: "ok")], engine: "stub", noVoice: false, peakLevel: 0.5)
+    }
+
+    /// A failed split is started again at launch only while it has been tried fewer than three
+    /// times; one that was waiting or under way when the app went is always started again.
+    func testOnlyAFailedSplitRunsOutOfAttempts() throws {
+        XCTAssertEqual(Recording.maxPartsAttempts, 3)
+        func resumes(_ status: PartsStatus?, attempts: Int?, parts: Int? = nil) -> Bool {
+            var r = large(status, parts: parts)
+            r.partsAttempts = attempts
+            return r.resumesParts
+        }
+        XCTAssertTrue(resumes(.failed, attempts: nil), "failed in a build that did not count")
+        XCTAssertTrue(resumes(.failed, attempts: 1))
+        XCTAssertTrue(resumes(.failed, attempts: 2))
+        XCTAssertFalse(resumes(.failed, attempts: 3))
+        XCTAssertFalse(resumes(.failed, attempts: 4))
+        for status in [PartsStatus.pending, .running] {
+            XCTAssertTrue(resumes(status, attempts: 3), "\(status)")
+            XCTAssertTrue(resumes(status, attempts: 9), "\(status)")
+        }
+        XCTAssertTrue(resumes(nil, attempts: nil))
+        XCTAssertFalse(resumes(.done, attempts: 1, parts: 3))
+
+        var counted = large(.failed, note: "Photos is full")
+        counted.partsAttempts = 3
+        XCTAssertEqual(try JSONCoding.decoder.decode(Recording.self, from: JSONCoding.encoder.encode(counted)), counted)
+        let json = try JSONSerialization.jsonObject(with: JSONCoding.encoder.encode(recording())) as! [String: Any]
+        XCTAssertNil(json["partsAttempts"], "left out for a recording that was never split")
+    }
+
+    /// A recording that can never be split is tried at three launches, then left as it is: failed,
+    /// with its reason, reading as a recording too large to attach.
+    @MainActor
+    func testSplitThatAlwaysFailsIsLeftAloneAfterThreeLaunches() async throws {
+        let files = scratchFiles()
+        let r = try tooLargeOnDisk(files)
+        let asked = Log()
+        func launch() -> AppModel {
+            let model = AppModel(files: files, transcribe: Self.transcribed, split: { movie, _, _ in
+                asked.add(movie.lastPathComponent)
+                throw WriterError("This kind of video cannot be cut into parts.")
+            }, savePart: { _, name, _ in XCTFail("nothing to save"); return .init(localIdentifier: name, inAlbum: true) })
+            model.loadSaved()
+            model.resumeUnfinished()
+            return model
+        }
+        for attempt in 1...3 {
+            let model = launch()
+            XCTAssertEqual(model.recordings.first?.partsStatus, .pending, "launch \(attempt) tries")
+            try await wait { model.recordings.first?.partsStatus == .failed }
+            XCTAssertEqual(model.recordings.first?.partsStatus, .failed)
+            XCTAssertEqual(asked.lines.count, attempt)
+            XCTAssertEqual(model.recordings.first?.partsAttempts, attempt)
+            XCTAssertEqual(files.loadAll().first?.partsAttempts, attempt, "the count is kept for the next launch")
+        }
+        for _ in 4...5 {
+            let model = launch()
+            XCTAssertEqual(model.recordings.first?.partsStatus, .failed, "not queued again")
+            try await Task.sleep(nanoseconds: 300_000_000)
+            XCTAssertEqual(asked.lines.count, 3, "no fourth attempt")
+            let left = try XCTUnwrap(model.recordings.first)
+            XCTAssertEqual(left.id, r.id)
+            XCTAssertEqual(left.partsStatus, .failed)
+            XCTAssertEqual(left.partsNote, "This kind of video cannot be cut into parts.")
+            XCTAssertEqual(left.partsAttempts, 3)
+            XCTAssertEqual(AttachmentAdvice.row(for: left), "Too large to attach in T3 Code")
+            var asBefore = left
+            asBefore.partsStatus = nil
+            asBefore.partsNote = nil
+            XCTAssertEqual(AttachmentAdvice.detail(for: left), AttachmentAdvice.detail(for: asBefore))
+            XCTAssertEqual(Brief.text(for: left), Brief.text(for: asBefore))
+            XCTAssertEqual(files.loadAll().first, left)
+        }
+    }
+
+    /// One failure does not count against a recording: the next launch splits it.
+    @MainActor
+    func testSplitThatFailsOnceThenSucceedsEndsDone() async throws {
+        let files = scratchFiles()
+        _ = try tooLargeOnDisk(files)
+        let asked = Log()
+        func launch() -> AppModel {
+            let model = AppModel(files: files, transcribe: Self.transcribed, split: { movie, id, directory in
+                asked.add(movie.lastPathComponent)
+                if asked.lines.count == 1 { throw WriterError("Writing a part stalled.") }
+                return try Self.threeParts(id, directory)
+            }, savePart: { _, name, _ in .init(localIdentifier: name, inAlbum: true) })
+            model.loadSaved()
+            model.resumeUnfinished()
+            return model
+        }
+        let first = launch()
+        try await wait { first.recordings.first?.partsStatus == .failed }
+        XCTAssertEqual(first.recordings.first?.partsNote, "Writing a part stalled.")
+        XCTAssertEqual(first.recordings.first?.partsAttempts, 1)
+
+        let second = launch()
+        try await wait { second.recordings.first?.partsStatus == .done }
+        XCTAssertEqual(second.recordings.first?.partsStatus, .done)
+        XCTAssertEqual(second.recordings.first?.attachableParts, 3)
+        XCTAssertNil(second.recordings.first?.partsNote)
+        XCTAssertEqual(second.recordings.first?.partsAttempts, 2)
+        XCTAssertEqual(asked.lines.count, 2)
+
+        let third = launch()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(asked.lines.count, 2, "done is done")
+        XCTAssertEqual(third.recordings.first?.partsStatus, .done)
+    }
+
+    /// Deleting a recording while its parts are going into Photos stops the split: no further
+    /// part of it is saved, nothing brings the recording back, and the next one is split.
+    @MainActor
+    func testDeletingARecordingStopsItsSplit() async throws {
+        let files = scratchFiles()
+        let deleted = try tooLargeOnDisk(files, id: "20261111-224105")
+        let next = try tooLargeOnDisk(files, id: "20261111-230000")
+        let probe = Probe()
+        let saved = Log()
+        let model = AppModel(files: files, transcribe: Self.transcribed, split: { movie, id, directory in
+            probe.start(movie.lastPathComponent)
+            return try Self.threeParts(id, directory)
+        }, savePart: { _, name, _ in
+            saved.add(name)
+            // The first part is on its way into Photos when the recording is deleted.
+            if saved.lines.count == 1 { while !probe.released { Thread.sleep(forTimeInterval: 0.01) } }
+            return .init(localIdentifier: name, inAlbum: true)
+        })
+        defer { probe.release() }
+        model.loadSaved()
+        model.enqueueSplit(deleted.id)
+        model.enqueueSplit(next.id)
+        try await wait { saved.lines.count == 1 }
+        XCTAssertEqual(saved.lines, ["ScreenBrief-20261111-224105-part1of3.mov"])
+        XCTAssertEqual(model.recordings.first { $0.id == deleted.id }?.partsStatus, .running)
+        XCTAssertEqual(model.recordings.first { $0.id == next.id }?.partsStatus, .pending)
+
+        model.delete(try XCTUnwrap(model.recordings.first { $0.id == deleted.id }))
+        XCTAssertEqual(model.recordings.map(\.id), [next.id])
+        probe.release()
+
+        try await wait { model.recordings.first?.partsStatus == .done }
+        XCTAssertEqual(saved.lines, [
+            "ScreenBrief-20261111-224105-part1of3.mov",
+            "ScreenBrief-20261111-230000-part1of3.mov",
+            "ScreenBrief-20261111-230000-part2of3.mov",
+            "ScreenBrief-20261111-230000-part3of3.mov",
+        ], "no part of the deleted recording after the delete; the queue went on to the next")
+        XCTAssertEqual(probe.started, ["20261111-224105.mov", "20261111-230000.mov"])
+        XCTAssertEqual(model.recordings.map(\.id), [next.id], "the deleted recording does not come back")
+        XCTAssertEqual(model.recordings.first?.attachableParts, 3)
+        XCTAssertEqual(try names(in: files), ["20261111-230000.json", "20261111-230000.mov"], "nor does its sidecar")
+        XCTAssertEqual(files.loadAll().map(\.id), [next.id])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: files.parts.appendingPathComponent(deleted.id).path), "its part files are removed")
+        XCTAssertTrue(files.dismissed().contains(deleted.assetId))
+
+        // Nor does a part of it arrive later.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(saved.lines.count, 4)
+    }
+
+    func testSplitDeadlineIsTwiceTheLengthAndAtLeastFiveMinutes() {
+        XCTAssertEqual(MovieSplitter.deadline(forDuration: 0), 300)
+        XCTAssertEqual(MovieSplitter.deadline(forDuration: 150), 300)
+        XCTAssertEqual(MovieSplitter.deadline(forDuration: 151), 302)
+        XCTAssertEqual(MovieSplitter.deadline(forDuration: 1300), 2600)
+    }
+
+    /// A split that never returns (and ignores cancellation) is marked failed once its deadline
+    /// passes, and the recording queued behind it is still split.
+    @MainActor
+    func testStalledSplitFailsAndTheNextRecordingIsStillSplit() async throws {
+        let files = scratchFiles()
+        let stalled = try tooLargeOnDisk(files, id: "20261111-224105", duration: 1300)
+        let next = try tooLargeOnDisk(files, id: "20261111-230000", duration: 900)
+        let probe = Probe()
+        let saved = Log()
+        var deadlinesAskedFor: [Double] = []
+        let model = AppModel(files: files, transcribe: Self.transcribed, split: { movie, id, directory in
+            probe.start(movie.lastPathComponent)
+            if id == "20261111-224105" {
+                while !probe.released {
+                    if Task.isCancelled { probe.sawCancel() }
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            }
+            return try Self.threeParts(id, directory)
+        }, savePart: { _, name, _ in
+            saved.add(name)
+            return .init(localIdentifier: name, inAlbum: true)
+        }, splitDeadline: { duration in
+            deadlinesAskedFor.append(duration)
+            return duration == 1300 ? 0.3 : 60
+        })
+        defer { probe.release() }
+        func now(_ id: String) -> Recording? { model.recordings.first { $0.id == id } }
+        model.loadSaved()
+        model.enqueueSplit(stalled.id)
+        model.enqueueSplit(next.id)
+        try await wait { now(next.id)?.partsStatus == .done }
+
+        XCTAssertEqual(probe.started, ["20261111-224105.mov", "20261111-230000.mov"], "one at a time, in order")
+        XCTAssertEqual(deadlinesAskedFor, [1300, 900], "the deadline is asked for with the recording's length")
+        XCTAssertEqual(now(stalled.id)?.partsStatus, .failed)
+        XCTAssertEqual(now(stalled.id)?.partsNote, "Splitting timed out.")
+        XCTAssertNil(now(stalled.id)?.attachableParts)
+        XCTAssertEqual(now(stalled.id).flatMap(AttachmentAdvice.row), "Too large to attach in T3 Code")
+        XCTAssertEqual(now(next.id)?.partsStatus, .done)
+        XCTAssertEqual(now(next.id)?.attachableParts, 3)
+        XCTAssertEqual(saved.lines, [
+            "ScreenBrief-20261111-230000-part1of3.mov",
+            "ScreenBrief-20261111-230000-part2of3.mov",
+            "ScreenBrief-20261111-230000-part3of3.mov",
+        ])
+        XCTAssertEqual(files.loadAll().first { $0.id == stalled.id }?.partsStatus, .failed)
+        for _ in 0..<100 where !probe.cancelled { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(probe.cancelled, "the stalled split was told to stop")
+
+        // Parts that arrive after the deadline are neither saved nor counted.
+        probe.release()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(saved.lines.count, 3)
+        XCTAssertEqual(now(stalled.id)?.partsStatus, .failed)
+        XCTAssertEqual(now(stalled.id)?.partsNote, "Splitting timed out.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: files.parts.appendingPathComponent(stalled.id).path))
     }
 
     // MARK: Diagnostics

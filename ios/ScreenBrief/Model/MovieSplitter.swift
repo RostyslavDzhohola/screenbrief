@@ -31,6 +31,11 @@ enum MovieSplitter {
     /// The parts' lengths must add up to the movie's within this many seconds.
     static let durationTolerance = 0.5
 
+    static let timedOutNote = "Splitting timed out."
+
+    /// Seconds one split may take before the app gives up on it and moves on.
+    static func deadline(forDuration seconds: Double) -> TimeInterval { max(300, 2 * seconds) }
+
     /// The parts of `movie`, written to `directory` as "ScreenBrief-<id>-part<k>of<n>.mov", in
     /// order. Empty (and nothing written) when the movie is within `maxBytes`. Every part is
     /// checked against `maxBytes` after it is written; if one is over, the movie is cut finer
@@ -165,6 +170,8 @@ enum MovieSplitter {
         var start = CMTime.zero
 
         for (k, end) in ends.enumerated() {
+            // Cancelled (the recording was deleted, or its deadline passed): no further part.
+            try Task.checkCancellation()
             let title = RecordingAlbum.partTitle(id: id, part: k + 1, of: ends.count)
             let url = directory.appendingPathComponent("\(title).mov")
             let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
