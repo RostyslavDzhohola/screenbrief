@@ -80,7 +80,8 @@ final class AppModel {
     }
 
     /// Queues what a previous launch left half done: transcripts, and the parts of recordings
-    /// too large to attach (but not of one whose split has failed too often to try again).
+    /// too large to attach (but not of one whose split has failed too often to try again: that
+    /// one waits for `retrySplit`).
     func resumeUnfinished() {
         for r in recordings where r.transcriptStatus == .pending || r.transcriptStatus == .running { enqueueTranscription(r.id) }
         for r in recordings where r.resumesParts { enqueueSplit(r.id) }
@@ -261,17 +262,21 @@ final class AppModel {
             let startedAt = r.startedAt
             let split = split
             let savePart = savePart
-            let work = Task.detached(priority: .utility) { () -> Int in
+            let work = Task.detached(priority: .utility) { [weak self] () -> Int in
                 // Saved or not, the part files go: Photos has its own copies.
                 defer { try? FileManager.default.removeItem(at: directory) }
                 let parts = try await split(movie, id, directory)
                 guard parts.count >= 2 else { throw WriterError("The video was not split into parts.") }
-                for part in parts {
+                // An earlier attempt may have got some of them into Photos before it failed.
+                let inPhotos = await self?.partsInPhotos(id, of: parts.count) ?? []
+                for (i, part) in parts.enumerated() where !inPhotos.contains(i + 1) {
                     // Cancelled (the recording was deleted, or the split ran out of time): the
                     // parts not yet in Photos stay out of it.
                     try Task.checkCancellation()
                     // Each part's date is its place in the recording, so Photos sorts them in order.
                     _ = try savePart(part.url, part.url.lastPathComponent, startedAt.addingTimeInterval(part.offsetSec))
+                    // Remembered at once: the app may be closed before the next part is saved.
+                    await self?.rememberPartInPhotos(id, part: i + 1, of: parts.count)
                 }
                 return parts.count
             }
@@ -280,7 +285,7 @@ final class AppModel {
             do {
                 // Bounded: a split that never completes must not hold up the ones behind it.
                 let count = try await Deadline.run(seconds: splitDeadline(r.durationSec), priority: .utility) { try await work.value }
-                update(id) { $0.partsStatus = .done; $0.partCount = count; $0.partsNote = nil }
+                update(id) { $0.partsStatus = .done; $0.partCount = count; $0.partsNote = nil; $0.partsInPhotos = nil }
             } catch is Deadline.TimedOut {
                 work.cancel()
                 update(id) { $0.partsStatus = .failed; $0.partCount = nil; $0.partsNote = MovieSplitter.timedOutNote }
@@ -291,6 +296,33 @@ final class AppModel {
             splitTask = nil
         }
         splitting = false
+    }
+
+    /// The parts of `id` that an earlier attempt saved to Photos, when that attempt also made
+    /// `count` parts. Parts of a split into another number are cut elsewhere: they are forgotten
+    /// (and stay in Photos: deleting them would put a system dialog in front of the user), and
+    /// every part is saved.
+    private func partsInPhotos(_ id: String, of count: Int) -> Set<Int> {
+        guard let known = recordings.first(where: { $0.id == id })?.partsInPhotos else { return [] }
+        if known.of == count { return Set(known.parts) }
+        update(id) { $0.partsInPhotos = nil }
+        return []
+    }
+
+    private func rememberPartInPhotos(_ id: String, part: Int, of count: Int) {
+        update(id) {
+            var parts = $0.partsInPhotos?.of == count ? $0.partsInPhotos?.parts ?? [] : []
+            if !parts.contains(part) { parts.append(part) }
+            $0.partsInPhotos = PartsInPhotos(of: count, parts: parts.sorted())
+        }
+    }
+
+    /// The user asks for the parts again after a split that failed (having freed space, say).
+    /// The attempts are counted from the start again, so launches try too.
+    func retrySplit(_ id: String) {
+        guard let r = recordings.first(where: { $0.id == id }), r.partsFailed else { return }
+        update(id) { $0.partsAttempts = nil }
+        enqueueSplit(id)
     }
 
     // MARK: Actions

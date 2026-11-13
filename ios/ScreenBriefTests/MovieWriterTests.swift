@@ -132,11 +132,15 @@ final class MovieWriterTests: XCTestCase {
         XCTAssertEqual(w.finish(timeout: 1).finished, false)
     }
 
-    /// `finish` gives up waiting but must leave the file: `cancelWriting` would delete it. A zero
-    /// timeout always expires first, as finishing has to flush the encoder and write the file.
+    /// `finish` gives up waiting but must leave the file: `cancelWriting` would delete it. The
+    /// writer's "finished" is held back until `finish` has returned, so the wait runs out however
+    /// fast the writer is.
     func testFinishTimeoutKeepsTheFile() {
         let out = url("timeout.mov")
         let w = MovieWriter(outputURL: out)
+        XCTAssertNil(w.beforeFinishIsSignalled, "nothing is held back unless a test asks")
+        let letGo = DispatchSemaphore(value: 0)
+        w.beforeFinishIsSignalled = { letGo.wait() }
         let feeder = SyntheticFeeder(video: { w.appendVideo($0) }, audio: { w.appendAudio($0) })
         feeder.feed(seconds: 3)
         let summary = w.finish(timeout: 0)
@@ -146,6 +150,12 @@ final class MovieWriterTests: XCTestCase {
         XCTAssertGreaterThan(summary.videoFramesAppended, 30)
         XCTAssertTrue(FileManager.default.fileExists(atPath: out.path), "the movie must survive a finish timeout")
         XCTAssertGreaterThan(BroadcastRecorder.fileSize(out), 0)
+
+        // Left alone, the writer ends by itself.
+        letGo.signal()
+        for _ in 0..<200 where !w.snapshot().finished { Thread.sleep(forTimeInterval: 0.05) }
+        XCTAssertTrue(w.snapshot().finished)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: out.path))
     }
 
     /// The file as it is on disk while the writer is still open (what a killed extension, or a
@@ -292,6 +302,9 @@ final class MovieWriterTests: XCTestCase {
                                   access: { .init(addOnly: .authorized, readWrite: .authorized) },
                                   saver: { _, _, _ in XCTFail("must not save a file its writer may still be changing"); return .init(localIdentifier: "", inAlbum: false) })
         XCTAssertNil(r.start())
+        // The writer's "finished" is held back, so the wait runs out however fast the writer is.
+        let letGo = DispatchSemaphore(value: 0)
+        r.writer.beforeFinishIsSignalled = { letGo.wait() }
         let feeder = SyntheticFeeder(video: { r.appendVideo($0) }, audio: { r.appendAudio($0) })
         feeder.feed(seconds: 3)
         let outcome = r.finish(timeout: 0)
@@ -308,6 +321,7 @@ final class MovieWriterTests: XCTestCase {
         XCTAssertNil(after.savedAssetId)
 
         // The writer ends in its own time (on the phone, with the extension's process).
+        letGo.signal()
         for _ in 0..<200 where !r.writer.snapshot().finished { try await Task.sleep(nanoseconds: 50_000_000) }
         XCTAssertTrue(r.writer.snapshot().finished)
         XCTAssertTrue(FileManager.default.fileExists(atPath: r.fileURL.path))

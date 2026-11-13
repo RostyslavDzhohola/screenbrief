@@ -100,6 +100,9 @@ final class MovieWriter {
     let outputURL: URL
     /// Wall clock in seconds; injectable for tests.
     var wallClock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// For tests only: runs when the writer has ended, before `finish` is told so. A test waits
+    /// in it to make `finish` time out for certain. Nil in the app and the extension.
+    var beforeFinishIsSignalled: (() -> Void)?
 
     private enum Phase { case idle, deciding, writing, finished }
 
@@ -255,10 +258,14 @@ final class MovieWriter {
         videoInput?.markAsFinished()
         audioInput?.markAsFinished()
         if lastSampleEnd.isValid { writer.endSession(atSourceTime: lastSampleEnd - sessionStart) }
+        let beforeSignal = beforeFinishIsSignalled
         lock.unlock()
 
         let done = DispatchSemaphore(value: 0)
-        writer.finishWriting { done.signal() }
+        writer.finishWriting {
+            beforeSignal?()
+            done.signal()
+        }
         // On a timeout the writer is left alone: `cancelWriting` would delete the file, and a
         // fragmented movie is readable up to its last fragment as it is on disk.
         let timedOut = done.wait(timeout: .now() + timeout) == .timedOut

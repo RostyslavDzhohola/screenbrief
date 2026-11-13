@@ -15,6 +15,15 @@ enum PartsStatus: String, Codable, Equatable {
     case pending, running, done, failed
 }
 
+/// The parts of a recording that an unfinished split has already saved to Photos.
+struct PartsInPhotos: Codable, Equatable, Hashable {
+    /// How many parts that split made. A split into another number cuts elsewhere, so these
+    /// parts are not parts of it.
+    var of: Int
+    /// Which of them are in Photos, counted from 1.
+    var parts: [Int]
+}
+
 /// A recording the app keeps. Stored as `Documents/Recordings/<id>.json` next to the movie
 /// `<id>.mov|mp4`; the Mac's `screenbrief pull` reads both. The first six fields are the contract
 /// with the Mac; the rest are the app's own bookkeeping.
@@ -49,6 +58,9 @@ struct Recording: Codable, Equatable, Identifiable, Hashable {
     var partsNote: String?
     /// How many times splitting it into parts was started.
     var partsAttempts: Int?
+    /// The parts a split that did not finish got into Photos, so the next attempt does not save
+    /// them a second time. Nil once all the parts are there.
+    var partsInPhotos: PartsInPhotos?
 
     /// The largest file T3 Code attaches to a thread (50 MiB).
     static let maxAttachmentBytes: Int64 = 50 * 1_048_576
@@ -76,6 +88,9 @@ struct Recording: Codable, Equatable, Identifiable, Hashable {
     var resumesParts: Bool {
         needsParts && (partsStatus != .failed || (partsAttempts ?? 0) < Recording.maxPartsAttempts)
     }
+
+    /// Too large, and the last split failed: the user can ask for another.
+    var partsFailed: Bool { needsParts && partsStatus == .failed }
 
     var transcriptPreview: String? {
         guard let transcript, !transcript.isEmpty else { return nil }
@@ -106,6 +121,13 @@ enum AttachmentAdvice {
         }
         if r.isSplitting { return "Too large to attach in one file. Splitting it into parts…" }
         return "Too large to attach in T3 Code: this video is \(Format.bytes(r.sizeBytes)) and the limit is \(limitText). It will only transfer on the same Wi-Fi as your Mac (or plugged in), with the phone unlocked. Copy still works."
+    }
+
+    /// Why the parts were not made, shown on the detail screen above "Try splitting again". Nil
+    /// unless the last split failed.
+    static func partsFailure(for r: Recording) -> String? {
+        guard r.partsFailed else { return nil }
+        return "Splitting it into parts failed\(r.partsNote.map { ": \($0)" } ?? ".")"
     }
 
     /// The short version for the list.

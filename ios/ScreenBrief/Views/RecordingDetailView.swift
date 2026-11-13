@@ -32,6 +32,14 @@ struct RecordingDetailView: View {
                             .accessibilityIdentifier("too-large")
                     }
 
+                    if let failure = AttachmentAdvice.partsFailure(for: r) {
+                        Text(failure).font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("parts-failure")
+                        Button("Try splitting again") { model.retrySplit(r.id) }
+                            .buttonStyle(.bordered)
+                            .accessibilityIdentifier("retry-split")
+                    }
+
                     Button {
                         model.copyBrief(r)
                         withAnimation { copied = true }
