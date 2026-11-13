@@ -328,11 +328,12 @@ test('watch: settings in force at install reach the background check', async () 
   process.env.SCREENBRIEF_T3_ATTACHMENTS = '/Volumes/Other/attachments';
   try {
     assert.match(watchPlistXml(), /<key>SCREENBRIEF_T3_ATTACHMENTS<\/key>\s*<string>\/Volumes\/Other\/attachments<\/string>/);
+    delete process.env.SCREENBRIEF_T3_ATTACHMENTS;
+    assert.doesNotMatch(watchPlistXml(), /SCREENBRIEF_T3_ATTACHMENTS/);
   } finally {
     if (before === undefined) delete process.env.SCREENBRIEF_T3_ATTACHMENTS;
     else process.env.SCREENBRIEF_T3_ATTACHMENTS = before;
   }
-  assert.doesNotMatch(watchPlistXml(), /SCREENBRIEF_T3_ATTACHMENTS/);
 });
 
 test('watch: the launchd job runs `screenbrief watch` every two minutes and is valid', async () => {

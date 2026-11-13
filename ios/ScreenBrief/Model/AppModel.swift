@@ -38,6 +38,8 @@ final class AppModel {
     /// Splitting a movie into parts, and saving one part to Photos; injectable for tests.
     private let split: MovieSplitter.Work
     private let savePart: MovieSplitter.Save
+    /// Whether a part saved earlier (by its Photos identifier) is still in Photos.
+    private let partStillInPhotos: (String) -> Bool
     private let splitDeadline: (_ durationSec: Double) -> TimeInterval
 
     init(files: RecordingFiles = .standard,
@@ -45,12 +47,14 @@ final class AppModel {
          transcriptionDeadline: @escaping (_ durationSec: Double) -> TimeInterval = Transcriber.deadline(forDuration:),
          split: @escaping MovieSplitter.Work = { try await MovieSplitter.split(movie: $0, id: $1, into: $2) },
          savePart: @escaping MovieSplitter.Save = { try RecordingAlbum.save(movie: $0, fileName: $1, creationDate: $2) },
+         partStillInPhotos: @escaping (String) -> Bool = RecordingAlbum.stillHas(localIdentifier:),
          splitDeadline: @escaping (_ durationSec: Double) -> TimeInterval = MovieSplitter.deadline(forDuration:)) {
         self.files = files
         self.transcribe = transcribe
         self.transcriptionDeadline = transcriptionDeadline
         self.split = split
         self.savePart = savePart
+        self.partStillInPhotos = partStillInPhotos
         self.splitDeadline = splitDeadline
     }
 
@@ -274,9 +278,9 @@ final class AppModel {
                     // parts not yet in Photos stay out of it.
                     try Task.checkCancellation()
                     // Each part's date is its place in the recording, so Photos sorts them in order.
-                    _ = try savePart(part.url, part.url.lastPathComponent, startedAt.addingTimeInterval(part.offsetSec))
+                    let saved = try savePart(part.url, part.url.lastPathComponent, startedAt.addingTimeInterval(part.offsetSec))
                     // Remembered at once: the app may be closed before the next part is saved.
-                    await self?.rememberPartInPhotos(id, part: i + 1, of: parts.count)
+                    await self?.rememberPartInPhotos(id, part: i + 1, of: parts.count, asset: saved.localIdentifier)
                 }
                 return parts.count
             }
@@ -298,22 +302,38 @@ final class AppModel {
         splitting = false
     }
 
-    /// The parts of `id` that an earlier attempt saved to Photos, when that attempt also made
-    /// `count` parts. Parts of a split into another number are cut elsewhere: they are forgotten
-    /// (and stay in Photos: deleting them would put a system dialog in front of the user), and
-    /// every part is saved.
+    /// The parts of `id` that an earlier attempt saved to Photos and that are still there, when
+    /// that attempt also made `count` parts. Parts of a split into another number are cut
+    /// elsewhere: they are forgotten (and stay in Photos: deleting them would put a system dialog
+    /// in front of the user), and every part is saved. A part the user has deleted from Photos
+    /// since is forgotten too, and saved again.
     private func partsInPhotos(_ id: String, of count: Int) -> Set<Int> {
         guard let known = recordings.first(where: { $0.id == id })?.partsInPhotos else { return [] }
-        if known.of == count { return Set(known.parts) }
-        update(id) { $0.partsInPhotos = nil }
-        return []
+        guard known.of == count else {
+            update(id) { $0.partsInPhotos = nil }
+            return []
+        }
+        let there = known.parts.filter { part in
+            guard let asset = known.assets?[String(part)] else { return true }
+            return partStillInPhotos(asset)
+        }
+        if there.count != known.parts.count {
+            update(id) {
+                $0.partsInPhotos = PartsInPhotos(of: count, parts: there,
+                                                 assets: known.assets?.filter { there.contains(Int($0.key) ?? 0) })
+            }
+        }
+        return Set(there)
     }
 
-    private func rememberPartInPhotos(_ id: String, part: Int, of count: Int) {
+    private func rememberPartInPhotos(_ id: String, part: Int, of count: Int, asset: String) {
         update(id) {
-            var parts = $0.partsInPhotos?.of == count ? $0.partsInPhotos?.parts ?? [] : []
+            let known = $0.partsInPhotos?.of == count ? $0.partsInPhotos : nil
+            var parts = known?.parts ?? []
+            var assets = known?.assets ?? [:]
             if !parts.contains(part) { parts.append(part) }
-            $0.partsInPhotos = PartsInPhotos(of: count, parts: parts.sorted())
+            assets[String(part)] = asset
+            $0.partsInPhotos = PartsInPhotos(of: count, parts: parts.sorted(), assets: assets)
         }
     }
 

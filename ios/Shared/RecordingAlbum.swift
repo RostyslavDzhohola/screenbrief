@@ -35,6 +35,14 @@ enum RecordingAlbum {
         status == .authorized || status == .limited
     }
 
+    /// Whether the asset saved under `localIdentifier` is still in Photos. Without permission to
+    /// read the library there is no telling, and it is taken to be there.
+    static func stillHas(localIdentifier: String) -> Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return true }
+        return PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).count > 0
+    }
+
     static func fetchAlbum() -> PHAssetCollection? {
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "title == %@", title)

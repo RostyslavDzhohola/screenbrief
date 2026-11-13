@@ -22,6 +22,15 @@ struct PartsInPhotos: Codable, Equatable, Hashable {
     var of: Int
     /// Which of them are in Photos, counted from 1.
     var parts: [Int]
+    /// The Photos identifier of each saved part, by its number: the user may delete a part from
+    /// Photos between attempts, and a part that is gone has to be saved again.
+    var assets: [String: String]?
+
+    init(of: Int, parts: [Int], assets: [String: String]? = nil) {
+        self.of = of
+        self.parts = parts
+        self.assets = assets
+    }
 }
 
 /// A recording the app keeps. Stored as `Documents/Recordings/<id>.json` next to the movie

@@ -648,16 +648,17 @@ final class BriefTests: XCTestCase {
             if name.hasSuffix("part2of3.mov"), !room.released { throw WriterError("Photos is full") }
             photos.add("\(name) \(ISO8601.string(from: date))")
             return .init(localIdentifier: name, inAlbum: true)
-        })
+        }, partStillInPhotos: { _ in true })
         func now() -> Recording? { model.recordings.first { $0.id == r.id } }
         let first = "ScreenBrief-20261111-224105-part1of3.mov 2026-11-11T22:41:05.000Z"
+        let onePart = PartsInPhotos(of: 3, parts: [1], assets: ["1": "ScreenBrief-20261111-224105-part1of3.mov"])
         model.loadSaved()
         model.resumeUnfinished()
         try await wait { now()?.partsStatus == .failed }
         XCTAssertEqual(now()?.partsNote, "Photos is full")
         XCTAssertEqual(photos.lines, [first])
-        XCTAssertEqual(now()?.partsInPhotos, PartsInPhotos(of: 3, parts: [1]))
-        XCTAssertEqual(files.loadAll().first?.partsInPhotos, PartsInPhotos(of: 3, parts: [1]), "kept for the next launch")
+        XCTAssertEqual(now()?.partsInPhotos, onePart)
+        XCTAssertEqual(files.loadAll().first?.partsInPhotos, onePart, "kept for the next launch")
         XCTAssertNil(now()?.attachableParts)
 
         // Still full: the second failure does not put part 1 in Photos again.
@@ -666,7 +667,7 @@ final class BriefTests: XCTestCase {
         try await wait { now()?.partsStatus == .failed }
         XCTAssertEqual(now()?.partsStatus, .failed)
         XCTAssertEqual(photos.lines, [first])
-        XCTAssertEqual(now()?.partsInPhotos, PartsInPhotos(of: 3, parts: [1]))
+        XCTAssertEqual(now()?.partsInPhotos, onePart)
 
         room.release()
         model.retrySplit(r.id)
@@ -710,6 +711,28 @@ final class BriefTests: XCTestCase {
         XCTAssertNil(files.loadAll().first?.partsInPhotos)
     }
 
+    /// The user deleted part 1 from Photos while freeing space: it is saved again with the rest,
+    /// and part 2, still there, is not.
+    @MainActor
+    func testAPartDeletedFromPhotosIsSavedAgain() async throws {
+        let files = scratchFiles()
+        var r = try tooLargeOnDisk(files)
+        r.partsStatus = .failed
+        r.partsAttempts = 1
+        r.partsInPhotos = PartsInPhotos(of: 3, parts: [1, 2], assets: ["1": "asset-1", "2": "asset-2"])
+        try files.save(r)
+        let photos = Log()
+        let model = AppModel(files: files, transcribe: Self.transcribed,
+                             split: { _, id, directory in try Self.threeParts(id, directory) },
+                             savePart: { _, name, _ in photos.add(name); return .init(localIdentifier: name, inAlbum: true) },
+                             partStillInPhotos: { $0 != "asset-1" })
+        model.loadSaved()
+        model.resumeUnfinished()
+        try await wait { model.recordings.first?.partsStatus == .done }
+        XCTAssertEqual(photos.lines, ["ScreenBrief-20261111-224105-part1of3.mov", "ScreenBrief-20261111-224105-part3of3.mov"])
+        XCTAssertEqual(model.recordings.first?.attachableParts, 3)
+    }
+
     /// The remembered parts are of a split into three; this time the movie is cut into four.
     /// None of the three is a part of the four, so all four are saved, and what is remembered
     /// from then on is of the four.
@@ -726,17 +749,19 @@ final class BriefTests: XCTestCase {
                 if name.hasSuffix("part3of4.mov"), !room.released { throw WriterError("Photos is full") }
                 photos.add(name)
                 return .init(localIdentifier: name, inAlbum: true)
-            })
+            }, partStillInPhotos: { _ in true })
             model.loadSaved()
             model.resumeUnfinished()
             return model
         }
+        let twoOfFour = PartsInPhotos(of: 4, parts: [1, 2], assets: ["1": "ScreenBrief-20261111-224105-part1of4.mov",
+                                                                     "2": "ScreenBrief-20261111-224105-part2of4.mov"])
         let first = launch()
         try await wait { first.recordings.first?.partsStatus == .failed }
         XCTAssertEqual(photos.lines, ["ScreenBrief-20261111-224105-part1of4.mov", "ScreenBrief-20261111-224105-part2of4.mov"],
                        "parts 1 and 2 of three do not stand in for parts 1 and 2 of four")
-        XCTAssertEqual(first.recordings.first?.partsInPhotos, PartsInPhotos(of: 4, parts: [1, 2]))
-        XCTAssertEqual(files.loadAll().first?.partsInPhotos, PartsInPhotos(of: 4, parts: [1, 2]))
+        XCTAssertEqual(first.recordings.first?.partsInPhotos, twoOfFour)
+        XCTAssertEqual(files.loadAll().first?.partsInPhotos, twoOfFour)
 
         room.release()
         let second = launch()
