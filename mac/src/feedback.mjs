@@ -118,6 +118,16 @@ export function renderFeedback(b) {
   );
   L.push(`To look closer at any moment, extract more frames: \`screenbrief frames "${b.dir}" --at <seconds>\` or \`--from <s> --to <s> --fps 2\` (CLI at \`${b.cliPath}\`).`);
   L.push('');
+  // From real use: people ask "did you get the video?" and "where is it?" when the agent does not say.
+  L.push(
+    `Before you start on the changes, tell the user in one or two lines that you have the video (${fmtDuration(b.durationSec)}, ${b.frames.length} screenshots) ` +
+      `and where it is on this Mac: \`${b.recordingPath}\`.`,
+  );
+  L.push(
+    'The first and last few seconds usually show the recorder itself (the ScreenBrief app and the iOS "Screen Sharing" sheet) and the app switcher, not the app being tested: ignore those screens. ' +
+      'The first words may be missing if the user started talking during the countdown before recording began.',
+  );
+  L.push('');
   if (b.interrupted) {
     L.push('This recording was interrupted: the phone stopped sending before the recording ended, so the last moments are missing.');
     L.push('');

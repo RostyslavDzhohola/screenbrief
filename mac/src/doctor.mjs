@@ -52,6 +52,32 @@ export async function doctor() {
   const att = attachmentsDir();
   check(fs.existsSync(att), 'T3 Code attachments folder', fs.existsSync(att) ? att : `${att} missing: videos attached in T3 Code will not be found`, 'WARN');
   check(fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'touch-detect.mjs')), 'touch detector', 'src/touch-detect.mjs (optional)', 'WARN');
-  check(true, 'bundles folder', paths().recordings);
+  const store = canStore(paths().recordings);
+  check(store.ok, 'bundles folder', store.ok ? paths().recordings : `${paths().recordings}: ${store.why}`);
   return failed ? 1 : 0;
+}
+
+/** Whether `dir` can hold bundles: it is a writable folder, or its nearest existing parent is. */
+export function canStore(dir) {
+  let at = path.resolve(dir);
+  for (;;) {
+    let st = null;
+    try {
+      st = fs.statSync(at);
+    } catch {
+      /* not there yet: look at the parent */
+    }
+    if (st) {
+      if (!st.isDirectory()) return { ok: false, why: `${at} is a file, not a folder` };
+      try {
+        fs.accessSync(at, fs.constants.W_OK | fs.constants.X_OK);
+        return { ok: true };
+      } catch {
+        return { ok: false, why: `${at} cannot be written to` };
+      }
+    }
+    const up = path.dirname(at);
+    if (up === at) return { ok: false, why: 'no existing parent folder' };
+    at = up;
+  }
 }

@@ -120,6 +120,8 @@ enum MovieSplitter {
             guard reader.startReading() else { throw reader.error ?? WriterError("The video could not be read.") }
             var g = 0
             while let sample = try next(output, track) {
+                // Cancelled (the recording was deleted, or its deadline passed): stop reading.
+                try Task.checkCancellation()
                 let time = CMSampleBufferGetPresentationTimeStamp(sample)
                 let bytes = Int64(CMSampleBufferGetTotalSampleSize(sample))
                     + Int64(CMSampleBufferGetNumSamples(sample)) * tableBytesPerSample
@@ -198,6 +200,7 @@ enum MovieSplitter {
             var open = Set(inputs.indices)
             var idle = 0
             while true {
+                try Task.checkCancellation()
                 // A track with nothing more for this part is finished now, so the writer does
                 // not hold the others back waiting for it.
                 for i in open where waiting[i].map({ leading($0, before: end, sound: tracks[i].isSound) == 0 }) ?? true {

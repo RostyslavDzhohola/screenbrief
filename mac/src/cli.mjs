@@ -1,4 +1,4 @@
-// Command-line interface: pull, process, frames, doctor.
+// Command-line interface: pull, process, frames, watch, doctor.
 import { pullRecording, PullError, bundleDirFor, findAttached, joinParts, idTime, titleFor } from './pull.mjs';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -7,6 +7,7 @@ import { loadConfig, ensureDirs, tools as toolPaths, paths, CLI_PATH } from './c
 import { processVideo, finishedFeedback } from './pipeline.mjs';
 import { probe, extractFrame } from './media.mjs';
 import { doctor } from './doctor.mjs';
+import { rememberWaiter, settleWaiter, listWaiters, watchOnce, withWatchLock, watchInstalled, installWatch, uninstallWatch, watchPlistPath, WATCH_INTERVAL_SEC } from './watch.mjs';
 import { fmtTimeForName, readJsonSync, mapLimit } from './util.mjs';
 
 const HELP = `screenbrief: phone screen recordings with spoken feedback -> a timeline an agent can read
@@ -20,6 +21,9 @@ Usage:
   screenbrief frames <bundle dir | recording id> --at <sec> [--at <sec> ...]
   screenbrief frames <bundle dir | recording id> --from <sec> --to <sec> [--fps <n>]
       extra frames around a moment
+  screenbrief watch [--install | --uninstall | --status]
+      fetch recordings that a pull could not get, once the iPhone is in reach again, and tell the
+      thread that asked. --install runs it every two minutes in the background.
   screenbrief doctor
       check ffmpeg, whisper and the rest
 
@@ -104,6 +108,7 @@ async function cmdPull(args) {
     const done = finishedFeedback(bundleDirFor(id));
     if (done) {
       say(`already here; reusing ${bundleDirFor(id)} (--force fetches and processes again)`);
+      settle(id);
       console.log(done);
       return 0;
     }
@@ -112,8 +117,9 @@ async function cmdPull(args) {
   try {
     // 1. The phone, when it can be reached.
     let pulled = null;
-    let phoneProblem = args['no-phone'] ? 'the phone was not tried (--no-phone)' : '';
-    if (!args['no-phone']) {
+    const noPhone = args['no-phone'] || process.env.SCREENBRIEF_NO_PHONE === '1';
+    let phoneProblem = noPhone ? 'the phone was not tried (--no-phone)' : '';
+    if (!noPhone) {
       try {
         pulled = await pullRecording(id, { device: args.device, destDir: staging, log: say });
       } catch (e) {
@@ -146,7 +152,8 @@ async function cmdPull(args) {
           `- iPhone: ${phoneProblem}\n` +
           (id === 'latest' ? '' : `- T3 Code attachments: ${attachProblem}\n`) +
           `Do not start on the changes and do not work from the transcript alone. Tell the user you need the video, ask them to ${ask}, and wait. ` +
-          `When it is attached, run this command again.`,
+          `When it is attached, run this command again.` +
+          laterNote(id),
       );
       return 2;
     }
@@ -154,6 +161,7 @@ async function cmdPull(args) {
     const done = finishedFeedback(outDir);
     if (done && !args.force) {
       say(`already processed; reusing ${outDir}`);
+      settle(pulled.id);
       console.log(done);
       return 0;
     }
@@ -173,11 +181,66 @@ async function cmdPull(args) {
       `${bundle.frames.length} frames, ${bundle.transcript.phrases.length} phrases, audio: ${bundle.transcript.audio.state}, ` +
         `${((Date.now() - started) / 1000).toFixed(1)}s for a ${bundle.durationSec.toFixed(1)}s recording`,
     );
+    // Only now: had processing failed, the request stays and the watcher tries again.
+    settle(pulled.id);
     console.log(bundle.feedbackPath);
     return 0;
   } finally {
     await fsp.rm(staging, { recursive: true, force: true });
   }
+}
+
+/**
+ * Remembers a pull that failed, so `screenbrief watch` can finish it when the phone is back in
+ * reach, and returns the lines that tell the agent so. Nothing when the watcher itself is asking.
+ */
+function laterNote(id) {
+  if (id === 'latest' || process.env.SCREENBRIEF_WATCHER === '1') return '';
+  const threadId = process.env.T3CODE_THREAD_ID || null;
+  const waiter = rememberWaiter(id, { threadId, t3Bin: process.env.T3CODE_CLI_PATH || null });
+  if (!waiter) return '';
+  if (!watchInstalled()) {
+    return `\n(Fetching it automatically later is off on this Mac. The user can turn it on once with: screenbrief watch --install)`;
+  }
+  return (
+    `\nThis request is remembered. When the iPhone is next in reach of this Mac (unlocked, on the same Wi-Fi or plugged in), ` +
+    `the video is fetched and processed automatically` +
+    (threadId ? `, and this thread gets a message with the FEEDBACK.md path. Tell the user that, and that attaching the video is only needed to continue sooner.` : `. Run this command again later.`)
+  );
+}
+
+/**
+ * A pull by hand that produced FEEDBACK.md ends this thread's wait. The watcher's own pull leaves
+ * the request: the waiting thread is told first.
+ */
+function settle(id) {
+  if (process.env.SCREENBRIEF_WATCHER !== '1') settleWaiter(id, { threadId: process.env.T3CODE_THREAD_ID || null });
+}
+
+async function cmdWatch(args) {
+  if (args.install) {
+    const file = await installWatch();
+    console.log(`installed ${file}: checks every ${WATCH_INTERVAL_SEC / 60} minutes, and only reaches for the iPhone while a recording is waiting. Remove with: screenbrief watch --uninstall`);
+    return 0;
+  }
+  if (args.uninstall) {
+    const r = await uninstallWatch();
+    console.log(r.removed ? `removed ${r.file}` : `not installed (${r.file})`);
+    return 0;
+  }
+  const waiters = listWaiters();
+  if (args.status) {
+    console.log(watchInstalled() ? `background check: on (${watchPlistPath()})` : 'background check: off (turn on with: screenbrief watch --install)');
+    if (!waiters.length) console.log('waiting: nothing');
+    for (const w of waiters) console.log(`waiting: ${w.id}  asked ${w.requestedAt}${w.threadId ? `  thread ${w.threadId}` : ''}`);
+    return 0;
+  }
+  if (!waiters.length) return 0; // the usual case: nothing to do, and the phone is left alone
+  ensureDirs();
+  const stamp = () => new Date().toISOString();
+  const results = await withWatchLock(() => watchOnce({ log: (m) => console.log(`${stamp()} ${m}`) }));
+  if (results === null) console.log(`${stamp()} another pass is still running`);
+  return 0;
 }
 
 async function cmdFrames(args) {
@@ -208,7 +271,7 @@ async function cmdFrames(args) {
 
 export async function main(argv) {
   const [cmd, ...rest] = argv;
-  const args = parseArgs(rest, { boolean: ['help', 'force', 'no-phone'] });
+  const args = parseArgs(rest, { boolean: ['help', 'force', 'no-phone', 'install', 'uninstall', 'status'] });
   switch (cmd) {
     case 'pull':
       return cmdPull(args);
@@ -216,6 +279,8 @@ export async function main(argv) {
       return cmdProcess(args);
     case 'frames':
       return cmdFrames(args);
+    case 'watch':
+      return cmdWatch(args);
     case 'doctor':
       return doctor();
     case undefined:

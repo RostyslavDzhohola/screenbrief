@@ -12,8 +12,7 @@ import { fixtures, tempHome, testEnv, cli } from './helpers.mjs';
 import { SCENARIO } from './synth.mjs';
 import { findAttached, joinParts, partOf, titleFor } from '../src/pull.mjs';
 
-const FFMPEG = '/opt/homebrew/bin/ffmpeg';
-const FFPROBE = '/opt/homebrew/bin/ffprobe';
+import { FFMPEG, FFPROBE } from './tools.mjs';
 const TOOLS = { ffmpeg: FFMPEG, ffprobe: FFPROBE };
 const ID = '20261112-101500';
 const quiet = ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y'];

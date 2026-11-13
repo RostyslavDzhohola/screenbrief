@@ -51,8 +51,8 @@ import { execFileSync } from 'node:child_process';
 import { idTime, findAttachedVideo, titleFor } from '../src/pull.mjs';
 import { finishedFeedback } from '../src/pipeline.mjs';
 
-const FFMPEG = '/opt/homebrew/bin/ffmpeg';
-const TOOLS = { ffprobe: '/opt/homebrew/bin/ffprobe', ffmpeg: FFMPEG };
+import { FFMPEG, FFPROBE } from './tools.mjs';
+const TOOLS = { ffprobe: FFPROBE, ffmpeg: FFMPEG };
 
 test('pull: an id is the local start time; other id shapes have none', () => {
   const t = idTime('20261111-225720');

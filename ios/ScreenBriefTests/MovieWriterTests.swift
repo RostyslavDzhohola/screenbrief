@@ -350,6 +350,24 @@ final class MovieWriterTests: XCTestCase {
         BroadcastRecorder(directory: dir, access: { .init(addOnly: .authorized, readWrite: .authorized) }, saver: saver)
     }
 
+    /// Builds before the move out of Caches may have left a movie in the old folder.
+    func testLeftoverMoviesInTheOldFolderAreRecovered() throws {
+        let old = recorderDirectory()
+        let leftover = try makeLeftover(in: old)
+        var saved: [String] = []
+        let r = BroadcastRecorder(directory: recorderDirectory(), alsoRecoverFrom: [old],
+                                  access: { .init(addOnly: .authorized, readWrite: .authorized) },
+                                  saver: { _, name, _ in saved.append(name); return .init(localIdentifier: "x", inAlbum: true) })
+        XCTAssertEqual(r.recoverLeftovers(), 1)
+        XCTAssertEqual(saved, ["ScreenBrief-20261111-200000.mov"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path))
+    }
+
+    func testUnsavedMoviesAreKeptOutOfCaches() {
+        XCTAssertFalse(BroadcastRecorder.defaultDirectory.path.contains("/Caches/"))
+        XCTAssertTrue(BroadcastRecorder.legacyDirectory.path.contains("/Caches/"))
+    }
+
     func testLeftoverMoviesAreRecovered() throws {
         let dir = recorderDirectory()
         let leftover = try makeLeftover(in: dir)

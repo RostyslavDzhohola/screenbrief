@@ -21,6 +21,14 @@ copied text is plain, so any agent that can run a command on the Mac can follow 
 The agent runs `screenbrief pull <id>`, reads the `FEEDBACK.md` it prints, opens the frames, and makes
 the changes. If it cannot get the video it is told to wait for you rather than guess from the transcript.
 
+**Pasting from the field without the video.** Turn on the background check once with
+`screenbrief watch --install`. A pull that cannot get the video is then remembered. When the iPhone is
+next in reach of the Mac (unlocked, on the same Wi-Fi or plugged in), the Mac fetches and processes the
+recording by itself and sends the waiting T3 Code thread a message with the `FEEDBACK.md` path, so the
+agent carries on without you attaching anything. The check runs every two minutes and only reaches for
+the phone while something is waiting. Getting the video across with no shared network at all is
+[issue #4](https://github.com/RostyslavDzhohola/screenbrief/issues/4).
+
 ## How it works
 
 ```mermaid
@@ -82,7 +90,8 @@ Mac and there is no pairing step.
 - **Portrait.** The movie's orientation is fixed by its first frame. Turning the phone to landscape
   partway through leaves that stretch sideways.
 - **Touches are not recorded** unless the app you are testing has the overlay.
-- **Built for one phone and one Mac.** Signing is manual, with a personal team.
+- **A personal tool, opened up.** It was made for one phone and one Mac. You build the iPhone app
+  yourself (see below); expect rough edges.
 
 ## Mac commands
 
@@ -90,6 +99,8 @@ Mac and there is no pairing step.
 screenbrief pull <id | latest>   # get a recording, process it, print the path of FEEDBACK.md
 screenbrief process <video>      # process any video file the same way
 screenbrief frames <bundle or id> --at 12.5     # extra frames around a moment
+screenbrief watch --install      # fetch recordings a pull could not get, once the phone is in reach
+screenbrief watch --status       # what is waiting; --uninstall turns the background check off
 screenbrief doctor               # check ffmpeg, whisper, devicectl and the attachments folder
 ```
 
@@ -99,20 +110,33 @@ Setup: Node 24, `brew install ffmpeg whisper-cpp`, a whisper model at
 `~/ScreenBrief/models/ggml-large-v3-turbo-q5_0.bin`, and `mac/bin/screenbrief` on the PATH (a symlink
 in `/opt/homebrew/bin` works). `screenbrief doctor` checks all of it.
 
-## Rebuilding the phone app
+## Building the phone app
+
+The app is not on the App Store: you build it with Xcode and your own Apple developer account.
+
+```
+scripts/set-identity.sh com.example ABCDE12345   # your bundle id prefix and 10-character team id
+brew install xcodegen                             # the script regenerates the project when it is installed
+open ios/ScreenBrief.xcodeproj                    # pick your iPhone and Run
+```
+
+`set-identity.sh` replaces the original bundle id prefix in the project's own files (project settings,
+entitlements, Swift sources, the Mac tool), sets your team, and switches to Xcode's automatic signing. It was checked
+by building the result for the simulator; signing with another account has not been tried by the author.
+
+From the command line, after editing `ios/project.yml`:
 
 ```
 cd ios
-xcodegen generate        # after editing project.yml
+xcodegen generate
 xcodebuild build -project ScreenBrief.xcodeproj -scheme ScreenBrief \
   -destination 'generic/platform=iOS' -derivedDataPath /tmp/sb-dd-device
 xcrun devicectl device install app --device <id from: xcrun devicectl list devices> \
   /tmp/sb-dd-device/Build/Products/Debug-iphoneos/ScreenBrief.app
 ```
 
-`project.yml` names the team, bundle ids and provisioning profiles ("ScreenBrief Dev",
-"ScreenBrief Broadcast Dev", "ScreenBrief UITests Dev"). To build it for another account, change
-those and the Keychain group in the two `.entitlements` files.
+As committed, `project.yml` names the author's team, bundle ids and provisioning profiles
+("ScreenBrief Dev", "ScreenBrief Broadcast Dev", "ScreenBrief UITests Dev").
 
 ## Tests
 

@@ -174,7 +174,10 @@ final class MovieSplitterTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(parts.count, 3)
         try await check(parts, of: movie, limit: limit)
         XCTAssertEqual(names(in: directory), Set(parts.map { $0.url.lastPathComponent }), "nothing but the parts")
+        // The Mac's tests read these from /tmp, which only the simulator can write to.
+        #if targetEnvironment(simulator)
         try leaveForTheMac(source: movie, parts: parts)
+        #endif
     }
 
     func testLandscapeRecordingKeepsItsRotationInEveryPart() async throws {

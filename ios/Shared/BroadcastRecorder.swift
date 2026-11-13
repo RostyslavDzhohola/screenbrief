@@ -34,6 +34,7 @@ final class BroadcastRecorder {
     let fileName: String
     let fileURL: URL
     let directory: URL
+    private let recoveryDirectories: [URL]
     let writer: MovieWriter
     var diagnosticsSink: ((BroadcastDiagnostics) -> Void)?
     var diagnosticsInterval: TimeInterval = 3
@@ -47,11 +48,14 @@ final class BroadcastRecorder {
     private var heartbeat: DispatchSourceTimer?
 
     init(directory: URL = BroadcastRecorder.defaultDirectory,
+         alsoRecoverFrom: [URL]? = nil,
          startedAt: Date = Date(),
          writerConfiguration: MovieWriter.Configuration = .init(),
          access: @escaping () -> PhotosAccess = { .current },
          saver: @escaping Saver = RecordingAlbum.save) {
         self.directory = directory
+        // Earlier builds recorded into Caches; a movie one of them left behind is still saved.
+        recoveryDirectories = [directory] + (alsoRecoverFrom ?? (directory == Self.defaultDirectory ? [Self.legacyDirectory] : []))
         self.startedAt = startedAt
         id = RecordingID.make(for: startedAt)
         let ext = writerConfiguration.fileType == .mp4 ? "mp4" : "mov"
@@ -66,7 +70,15 @@ final class BroadcastRecorder {
         diagnostics = BroadcastDiagnostics(recordingId: id, startedAt: startedAt, updatedAt: startedAt, phase: "started")
     }
 
+    /// Application Support, not Caches: iOS may empty Caches when storage runs low, and a movie
+    /// waiting here to be saved to Photos is the only copy of that recording.
     static var defaultDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("Recordings", isDirectory: true)
+    }
+
+    /// Where builds up to November 2026 recorded.
+    static var legacyDirectory: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("Recordings", isDirectory: true)
     }
@@ -74,6 +86,11 @@ final class BroadcastRecorder {
     /// Nil when recording may go ahead, otherwise the message to end the broadcast with.
     func start() -> String? {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Movies here are on their way to Photos: they do not belong in a device backup.
+        var folder = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? folder.setResourceValues(values)
         let a = access()
         update(force: true) {
             $0.photosAddOnly = RecordingAlbum.statusName(a.addOnly)
@@ -162,7 +179,9 @@ final class BroadcastRecorder {
     /// that recording. Returns how many were saved.
     @discardableResult
     func recoverLeftovers() -> Int {
-        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.creationDateKey])) ?? []
+        let files = recoveryDirectories.flatMap {
+            (try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: [.creationDateKey])) ?? []
+        }
         var saved = 0
         for url in files where url != fileURL && url.lastPathComponent.hasPrefix(RecordingAlbum.filePrefix) {
             let date = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
