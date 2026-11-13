@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScreenBrief: iPhone screen recordings your coding agent can read</title>
+<meta name="description" content="Record your iPhone screen while you say what you want changed, tap Copy, and paste into your coding agent's thread. The agent gets what you said next to screenshots of that moment. Open source, MIT.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e0f11" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ScreenBrief">
+<meta property="og:title" content="ScreenBrief: iPhone screen recordings your coding agent can read">
+<meta property="og:description" content="Record your iPhone screen while you say what you want changed, tap Copy, and paste into your agent's thread. The agent gets what you said next to screenshots of that moment.">
+<meta property="og:url" content="https://screenbrief-six.vercel.app/">
+<meta property="og:image" content="https://screenbrief-six.vercel.app/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="ScreenBrief: your coding agent gets what you said, next to what was on screen. A drawn timeline row pairs a spoken phrase with a phone screenshot.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="https://screenbrief-six.vercel.app/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2315171a'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%23f1f1ef' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23ff3b30'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f7f6f3;
+  --surface: #ffffff;
+  --ink: #15171a;
+  --muted: #595f67;
+  --line: #dddbd5;
+  --accent: #ff3b30;
+  --accent-fill: #e0241a;
+  --accent-ink: #c4170c;
+  --code-bg: #15171a;
+  --code-ink: #ecece9;
+  --code-dim: #9a9fa7;
+  --code-line: #15171a;
+  --shadow: 0 1px 2px rgba(21, 23, 26, .05), 0 12px 32px -16px rgba(21, 23, 26, .18);
+  /* drawn phone */
+  --p-body: #101113;
+  --p-edge: #33363b;
+  --p-bg: #f2f2f6;
+  --p-card: #ffffff;
+  --p-ink: #111214;
+  --p-dim: #62666d;
+  --p-line: #e2e2e7;
+  /* drawn frames */
+  --f-bg: #ffffff;
+  --f-ink: #2a2e33;
+  --f-dim: #c5c8cd;
+  --f-fill: #eceef0;
+  --f-edge: #cfcdc7;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e0f11;
+    --surface: #17191c;
+    --ink: #f1f1ef;
+    --muted: #a5aab1;
+    --line: #2b2e33;
+    --accent: #ff453a;
+    --accent-fill: #e0241a;
+    --accent-ink: #ff7067;
+    --code-bg: #17191c;
+    --code-ink: #ecece9;
+    --code-dim: #9a9fa7;
+    --code-line: #2b2e33;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 16px 36px -16px rgba(0, 0, 0, .7);
+    --p-body: #050506;
+    --p-edge: #3a3d43;
+    --p-bg: #000000;
+    --p-card: #1c1c1e;
+    --p-ink: #f4f4f5;
+    --p-dim: #a1a1a8;
+    --p-line: #2e2e32;
+    --f-bg: #1f2226;
+    --f-ink: #e4e4e1;
+    --f-dim: #50555d;
+    --f-fill: #2c3035;
+    --f-edge: #3a3d43;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 17px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, p, ol, ul, figure, blockquote, pre { margin: 0; }
+ol, ul { padding: 0; list-style: none; }
+a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+code, pre, .mono { font-family: var(--mono); }
+code { font-size: .9em; }
+p code, li code { background: color-mix(in srgb, var(--ink) 7%, transparent); padding: .1em .35em; border-radius: 5px; white-space: nowrap; }
+
+.wrap { max-width: 1128px; margin: 0 auto; padding-left: 24px; padding-right: 24px; }
+section { padding: 88px 0; border-top: 1px solid var(--line); }
+h2 { font-size: clamp(26px, 3.2vw, 34px); line-height: 1.15; letter-spacing: -.02em; font-weight: 700; }
+.sub { color: var(--muted); max-width: 62ch; margin-top: 14px; font-size: 18px; }
+.sub strong { color: var(--ink); font-weight: 600; }
+
+/* header */
+.top { display: flex; align-items: center; justify-content: space-between; padding-top: 22px; padding-bottom: 22px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; font-size: 19px; letter-spacing: -.01em; text-decoration: none; }
+.dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--ink); display: grid; place-items: center; flex: none; }
+.dot::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.top nav a { font-size: 15px; color: var(--muted); text-decoration: none; margin-left: 22px; }
+.top nav a:hover { color: var(--ink); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) 448px; gap: 48px; align-items: center; padding-top: 40px; padding-bottom: 96px; }
+h1 { font-size: clamp(36px, 4.6vw, 52px); line-height: 1.04; letter-spacing: -.03em; font-weight: 750; text-wrap: balance; }
+.lede { font-size: 20px; line-height: 1.5; color: var(--muted); margin-top: 22px; max-width: 34em; }
+.lede strong { color: var(--ink); font-weight: 600; }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 36px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.steps li { padding: 18px 18px 20px 0; }
+.steps li + li { padding-left: 18px; border-left: 1px solid var(--line); }
+.steps .n { font: 600 12px/1 var(--mono); color: var(--accent-ink); letter-spacing: .04em; }
+.steps h3 { font-size: 19px; line-height: 1.2; margin-top: 10px; letter-spacing: -.01em; }
+.steps p { font-size: 15px; line-height: 1.45; color: var(--muted); margin-top: 6px; }
+.cta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px; margin-top: 32px; }
+.btn { display: inline-flex; align-items: center; gap: 10px; background: var(--ink); color: var(--bg); font-weight: 600; font-size: 16px; padding: 13px 20px; border-radius: 10px; text-decoration: none; }
+.btn:hover { background: color-mix(in srgb, var(--ink) 86%, var(--bg)); }
+.btn svg { width: 18px; height: 18px; fill: currentColor; }
+.cta .more { font-size: 16px; }
+.fine { font-size: 14.5px; color: var(--muted); margin-top: 16px; }
+
+/* drawn phone */
+.visual { position: relative; padding-bottom: 120px; display: grid; justify-items: end; }
+.phone { width: 292px; background: var(--p-body); border-radius: 48px; padding: 9px; box-shadow: inset 0 0 0 1.5px var(--p-edge), 0 40px 60px -36px rgba(0, 0, 0, .45); }
+.screen { position: relative; background: var(--p-bg); color: var(--p-ink); border-radius: 40px; overflow: hidden; padding: 0 14px 30px; font-size: 13px; line-height: 1.35; min-height: 584px; }
+.island { position: absolute; top: 10px; left: 50%; width: 82px; height: 24px; margin-left: -41px; border-radius: 14px; background: #000; }
+.status { display: flex; justify-content: space-between; align-items: center; height: 46px; padding: 2px 12px 0 16px; font-weight: 600; font-size: 13.5px; }
+.status svg { height: 11px; width: auto; fill: var(--p-ink); }
+.p-title { font-size: 27px; font-weight: 700; letter-spacing: -.02em; padding: 10px 4px 12px; }
+.p-card { background: var(--p-card); border-radius: 14px; }
+.p-rec { padding: 12px; }
+.p-btn { display: flex; align-items: center; justify-content: center; gap: 9px; height: 46px; border-radius: 12px; background: var(--accent-fill); color: #fff; font-weight: 600; font-size: 15.5px; }
+.p-btn i { width: 13px; height: 13px; border-radius: 50%; background: #fff; }
+.p-hint { font-size: 11.5px; color: var(--p-dim); margin-top: 10px; padding: 0 2px; }
+.p-head { font-size: 12.5px; font-weight: 600; color: var(--p-dim); padding: 18px 6px 7px; }
+.p-row { padding: 10px 26px 11px 12px; position: relative; }
+.p-row + .p-row { border-top: 1px solid var(--p-line); }
+.p-row::after { content: ""; position: absolute; right: 13px; top: 50%; width: 6px; height: 6px; margin-top: -4px; border-top: 1.5px solid var(--p-dim); border-right: 1.5px solid var(--p-dim); transform: rotate(45deg); opacity: .7; }
+.p-row b { display: block; font-size: 14px; font-weight: 600; }
+.p-row .meta { display: block; font-size: 11.5px; color: var(--p-dim); margin-top: 1px; font-variant-numeric: tabular-nums; }
+.p-row .said { display: block; font-size: 12px; margin-top: 4px; }
+.home { position: absolute; left: 50%; bottom: 8px; width: 104px; height: 4px; margin-left: -52px; border-radius: 3px; background: var(--p-ink); opacity: .85; }
+
+.clip { position: absolute; left: 0; top: 458px; width: 318px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 14px 16px 16px; }
+.clip .label { display: flex; align-items: center; gap: 8px; font: 600 11.5px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.clip .label::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.clip p { font: 12px/1.55 var(--mono); margin-top: 10px; overflow-wrap: anywhere; }
+.clip .dim { color: var(--muted); }
+.clip .cmdline { display: block; margin: 6px 0; padding: 6px 9px; border-radius: 7px; background: color-mix(in srgb, var(--ink) 7%, transparent); font-weight: 600; }
+
+/* timeline */
+.doc { margin-top: 44px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; }
+.doc-head { display: flex; justify-content: space-between; gap: 16px; padding: 14px 28px; border-bottom: 1px solid var(--line); font: 13px/1.4 var(--mono); color: var(--muted); }
+.doc-head b { color: var(--ink); font-weight: 600; }
+.t-row { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 0 20px; padding: 30px 28px; align-items: center; }
+.t-row + .t-row { border-top: 1px solid var(--line); }
+.t-left { display: flex; align-items: center; gap: 20px; }
+.t-text { flex: 0 1 auto; min-width: 0; }
+.t-text blockquote, .t-text .none { white-space: nowrap; }
+.t-wire { flex: 1 1 40px; min-width: 40px; height: 1.5px; background: color-mix(in srgb, var(--muted) 45%, var(--surface)); position: relative; }
+.t-wire::after { content: ""; position: absolute; right: -4px; top: -3.25px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.t-time { font: 600 15px/1.4 var(--mono); color: var(--accent-ink); font-variant-numeric: tabular-nums; }
+.t-time small { font-weight: 400; font-size: 13px; color: var(--muted); margin-left: 8px; }
+.t-label { font: 600 12px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 18px 0 8px; }
+.t-right .t-label { margin-top: 0; margin-bottom: 10px; }
+.t-text blockquote { font-size: clamp(22px, 2.5vw, 29px); line-height: 1.25; font-weight: 650; letter-spacing: -.02em; }
+.t-text .none { font-size: 18px; line-height: 1.45; color: var(--muted); }
+.t-frames { display: flex; gap: 16px; }
+.frame { width: 112px; }
+.frame svg { display: block; width: 100%; height: auto; border-radius: 14px; background: var(--f-bg); box-shadow: 0 0 0 1px var(--f-edge); }
+.frame figcaption { font: 12px/1.4 var(--mono); color: var(--muted); margin-top: 9px; }
+.frame figcaption b { display: block; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.f-ink { fill: var(--f-ink); }
+.f-dim { fill: var(--f-dim); }
+.f-fill { fill: var(--f-fill); }
+.f-bgc { fill: var(--f-bg); }
+.f-field { fill: none; stroke: var(--f-dim); stroke-width: 1.2; }
+.f-stroke { fill: none; stroke: var(--f-ink); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.note { font-size: 14.5px; color: var(--muted); margin-top: 16px; }
+
+/* flow */
+.flow { display: grid; grid-template-columns: minmax(0, 1fr) 92px minmax(0, 1fr) 92px minmax(0, 1.12fr) 92px minmax(0, .92fr); margin-top: 44px; }
+.node { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 20px 20px 22px; }
+.node h3 { font-size: 18px; line-height: 1.2; letter-spacing: -.01em; }
+.node .kind { font: 12.5px/1.4 var(--mono); color: var(--muted); margin-top: 4px; }
+.node ol { margin-top: 16px; border-top: 1px solid var(--line); }
+.node ol li { font-size: 15px; line-height: 1.4; padding: 10px 0 0 18px; position: relative; }
+.node ol li::before { content: ""; position: absolute; left: 2px; top: 18px; width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
+.node ol li.key::before { background: var(--accent); }
+.link { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 0 8px; font: 12px/1.3 var(--mono); color: var(--muted); text-align: center; }
+.link i { display: block; position: relative; width: 100%; height: 1.5px; background: var(--ink); }
+.link i::after { content: ""; position: absolute; right: -1px; top: -4px; border-left: 8px solid var(--ink); border-top: 4.75px solid transparent; border-bottom: 4.75px solid transparent; }
+.facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 56px; margin-top: 48px; }
+.facts h3 { font-size: 17px; }
+.facts p { font-size: 16px; color: var(--muted); margin-top: 6px; }
+
+/* install */
+.install { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 56px; margin-top: 44px; align-items: start; }
+.needs li { padding: 13px 0; border-top: 1px solid var(--line); font-weight: 600; }
+.needs li:last-child { border-bottom: 1px solid var(--line); }
+.needs li span { display: block; font-weight: 400; font-size: 14.5px; color: var(--muted); }
+.stepno { font: 600 12px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.how h3 { font-size: 19px; margin-top: 8px; letter-spacing: -.01em; }
+.how p { color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 60ch; }
+.how > div + div { margin-top: 40px; }
+.code { position: relative; margin-top: 16px; background: var(--code-bg); color: var(--code-ink); border: 1px solid var(--code-line); border-radius: 14px; padding: 20px 22px; }
+.code pre { font-size: 13.5px; line-height: 1.75; white-space: normal; padding-right: 64px; }
+.code .cmd { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding-left: 2ch; text-indent: -2ch; }
+.code .cmd::before { content: "$ "; color: var(--code-dim); }
+.copy { position: absolute; top: 12px; right: 12px; font: 600 12.5px/1 var(--sans); color: var(--code-ink); background: rgba(255, 255, 255, .1); border: 1px solid rgba(255, 255, 255, .16); border-radius: 8px; padding: 8px 11px; cursor: pointer; }
+.copy:hover { background: rgba(255, 255, 255, .18); }
+
+/* privacy */
+.privacy { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 56px; align-items: start; }
+.privacy p { font-size: 21px; line-height: 1.45; max-width: 36em; letter-spacing: -.005em; }
+.privacy p + p { margin-top: 14px; color: var(--muted); }
+
+/* limits */
+.two { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 28px; margin-top: 44px; align-items: start; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 24px 26px 12px; }
+.card h3 { font-size: 18px; display: flex; align-items: center; gap: 10px; }
+.tag { font: 600 11.5px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--accent-ink); border: 1px solid currentColor; border-radius: 999px; padding: 5px 9px; }
+.card ul { margin-top: 14px; }
+.card li { font-size: 16px; padding: 13px 0; border-top: 1px solid var(--line); }
+.card li span { color: var(--muted); }
+
+footer { border-top: 1px solid var(--line); padding: 36px 0 56px; font-size: 15px; color: var(--muted); }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 32px; }
+footer a { color: var(--ink); }
+
+@media (max-width: 1040px) {
+  .hero { grid-template-columns: minmax(0, 1fr); gap: 56px; padding-top: 24px; padding-bottom: 72px; }
+  .visual { justify-items: center; padding-bottom: 0; }
+  .screen { min-height: 0; padding-bottom: 44px; }
+  .clip { position: relative; top: auto; width: min(100%, 340px); margin-top: 20px; }
+}
+@media (max-width: 900px) {
+  section { padding: 64px 0; }
+  .t-row { grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 26px 24px; }
+  .t-wire, .t-text br { display: none; }
+  .t-text blockquote, .t-text .none { white-space: normal; text-wrap: balance; }
+  .flow { grid-template-columns: minmax(0, 1fr); }
+  .link { flex-direction: row; justify-content: flex-start; gap: 14px; padding: 0 0 0 30px; height: 52px; }
+  .link i { order: -1; width: 1.5px; height: 34px; flex: none; }
+  .link i::after { right: auto; left: -4px; top: auto; bottom: -1px; border-top: 8px solid var(--ink); border-left: 4.75px solid transparent; border-right: 4.75px solid transparent; border-bottom: 0; }
+  .facts, .install, .privacy, .two { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+  .install { gap: 40px; }
+  .privacy p { font-size: 19px; }
+}
+@media (max-width: 520px) {
+  body { font-size: 16.5px; }
+  .wrap { padding-left: 20px; padding-right: 20px; }
+  .top nav a:not(.gh) { display: none; }
+  .lede { font-size: 18.5px; }
+  .steps { grid-template-columns: 1fr; }
+  .steps li { display: grid; grid-template-columns: 28px 1fr; padding: 16px 0; }
+  .steps li + li { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); }
+  .steps .n { padding-top: 6px; }
+  .steps h3 { margin-top: 0; }
+  .steps p { grid-column: 2; }
+  .doc-head { padding: 13px 20px; }
+  .doc-head span { display: none; }
+  .t-row { padding: 24px 20px; }
+  .frame { width: 108px; }
+  .code { padding: 18px 16px; }
+  .code pre { font-size: 12.5px; padding-right: 0; padding-top: 34px; }
+  .card { padding: 22px 20px 10px; }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+
+<header class="wrap top">
+  <a class="brand" href="#top" aria-label="ScreenBrief"><span class="dot" aria-hidden="true"></span>ScreenBrief</a>
+  <nav aria-label="Page">
+    <a href="#gets">What your agent gets</a>
+    <a href="#install">Install</a>
+    <a class="gh" href="https://github.com/RostyslavDzhohola/screenbrief">GitHub</a>
+  </nav>
+</header>
+
+<main id="top">
+  <div class="wrap hero">
+    <div>
+      <h1>Your coding agent gets what you said, next to what was on screen.</h1>
+      <p class="lede"><strong>ScreenBrief</strong> is for developers who build iPhone apps with a coding agent. Record your screen while you talk about what you want changed. The agent reads it as a timeline, then makes the changes.</p>
+      <ol class="steps">
+        <li><span class="n">01</span><h3>Record</h3><p>Use your app on the iPhone and say what you want changed.</p></li>
+        <li><span class="n">02</span><h3>Copy</h3><p>Open the recording in ScreenBrief and tap Copy.</p></li>
+        <li><span class="n">03</span><h3>Paste</h3><p>Paste into your agent's thread. Away from your Mac, attach the video from Photos too.</p></li>
+      </ol>
+      <div class="cta">
+        <a class="btn" href="https://github.com/RostyslavDzhohola/screenbrief">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.01.08-2.11 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.91.08 2.11.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>
+          View on GitHub
+        </a>
+        <a class="more" href="#install">How to install</a>
+      </div>
+      <p class="fine">Open source, MIT. You build both parts from source.</p>
+    </div>
+
+    <div class="visual">
+      <div class="phone" role="img" aria-label="Drawing of the ScreenBrief iPhone app: a red Start recording button above a list of two recordings, each with its length, size and the first words of its transcript.">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="status">
+            <span>9:41</span>
+            <svg viewBox="0 0 46 11"><rect x="0" y="7" width="3" height="4" rx=".8"/><rect x="5" y="5" width="3" height="6" rx=".8"/><rect x="10" y="2.5" width="3" height="8.5" rx=".8"/><rect x="15" y="0" width="3" height="11" rx=".8"/><rect x="25" y=".5" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-opacity=".45"/><rect x="26.5" y="2" width="15" height="7" rx="1.8"/><rect x="44" y="3.5" width="1.6" height="4" rx=".8" opacity=".5"/></svg>
+          </div>
+          <div class="p-title">ScreenBrief</div>
+          <div class="p-card p-rec">
+            <div class="p-btn"><i></i>Start recording</div>
+            <div class="p-hint">Tap Start Sharing, then switch to the app you are testing and talk.</div>
+          </div>
+          <div class="p-head">Recordings</div>
+          <div class="p-card">
+            <div class="p-row"><b>Mon 9:41 AM</b><span class="meta">0:48 &nbsp;·&nbsp; 4.5 MB</span><span class="said">The trip title is cut off here. Let it wrap to two lines.</span></div>
+            <div class="p-row"><b>Sun 4:12 PM</b><span class="meta">2:10 &nbsp;·&nbsp; 12.1 MB</span><span class="said">Going back from settings loses my place in the list.</span></div>
+          </div>
+          <div class="home"></div>
+        </div>
+      </div>
+
+      <div class="clip">
+        <div class="label">What Copy puts on your clipboard</div>
+        <p>Phone feedback recording 20260518-094102: 48 seconds <span class="dim">…</span><br>
+        Agent: get the video before doing anything else. On the Mac run:
+        <span class="cmdline">screenbrief pull 20260518-094102</span>
+        <span class="dim">…<br>[00:03] The trip title is cut off here. Let it wrap to two lines.<br>[00:12] Make this button full width.</span></p>
+      </div>
+    </div>
+  </div>
+
+  <section id="gets" aria-labelledby="gets-h">
+    <div class="wrap">
+      <h2 id="gets-h">What your agent gets</h2>
+      <p class="sub">The agent runs one command on your Mac and gets a timeline: <strong>what you said, next to screenshots of what was on screen at that moment.</strong> One screenshot for each spoken phrase and each screen change.</p>
+
+      <div class="doc">
+        <div class="doc-head"><b>FEEDBACK.md</b><span>## Timeline</span></div>
+
+        <div class="t-row">
+          <div class="t-left">
+            <div class="t-text">
+              <div class="t-time">00:03.1 - 00:08.4</div>
+              <div class="t-label">Said</div>
+              <blockquote>"The trip title is cut off here.<br> Let it wrap to two lines."</blockquote>
+            </div>
+            <span class="t-wire" aria-hidden="true"></span>
+          </div>
+          <div class="t-right">
+            <div class="t-label">Screen</div>
+            <div class="t-frames">
+              <figure class="frame">
+                <svg viewBox="0 0 120 258" role="img" aria-label="Drawn screenshot: a trip page whose title runs off the edge and ends in an ellipsis.">
+                  <rect class="f-dim" x="12" y="11" width="16" height="3.5" rx="1.75"/><rect class="f-dim" x="92" y="11" width="16" height="3.5" rx="1.75"/>
+                  <path class="f-stroke" d="M16 29l-5 5 5 5"/>
+                  <rect class="f-fill" x="10" y="48" width="100" height="62" rx="9"/>
+                  <path class="f-dim" d="M10 101l24-26 16 15 20-24 40 38v-3 0a9 9 0 0 1-9 9H19a9 9 0 0 1-9-9z"/>
+                  <circle class="f-dim" cx="92" cy="63" r="6"/>
+                  <rect class="f-ink" x="10" y="121" width="88" height="10" rx="3"/>
+                  <circle class="f-ink" cx="102" cy="129" r="1.4"/><circle class="f-ink" cx="106.5" cy="129" r="1.4"/><circle class="f-ink" cx="111" cy="129" r="1.4"/>
+                  <rect class="f-dim" x="10" y="139" width="54" height="5" rx="2.5"/>
+                  <rect class="f-fill" x="10" y="158" width="100" height="1"/>
+                  <circle class="f-fill" cx="19" cy="176" r="8"/><rect class="f-ink" x="34" y="170" width="46" height="5" rx="2.5"/><rect class="f-dim" x="34" y="179" width="62" height="4" rx="2"/>
+                  <rect class="f-fill" x="10" y="193" width="100" height="1"/>
+                  <circle class="f-fill" cx="19" cy="211" r="8"/><rect class="f-ink" x="34" y="205" width="38" height="5" rx="2.5"/><rect class="f-dim" x="34" y="214" width="54" height="4" rx="2"/>
+                  <rect class="f-fill" x="10" y="228" width="100" height="1"/>
+                  <rect class="f-ink" x="42" y="247" width="36" height="3.5" rx="1.75" opacity=".8"/>
+                </svg>
+                <figcaption><b>#2 · 00:03.1</b>screen when this was said</figcaption>
+              </figure>
+            </div>
+          </div>
+        </div>
+
+        <div class="t-row">
+          <div class="t-left">
+            <div class="t-text">
+              <div class="t-time">00:12.0 - 00:16.4</div>
+              <div class="t-label">Said</div>
+              <blockquote>"Make this button full width."</blockquote>
+            </div>
+            <span class="t-wire" aria-hidden="true"></span>
+          </div>
+          <div class="t-right">
+            <div class="t-label">Screen</div>
+            <div class="t-frames">
+              <figure class="frame">
+                <svg viewBox="0 0 120 258" role="img" aria-label="Drawn screenshot: a booking form with three fields and a short button that does not span the screen.">
+                  <rect class="f-dim" x="12" y="11" width="16" height="3.5" rx="1.75"/><rect class="f-dim" x="92" y="11" width="16" height="3.5" rx="1.75"/>
+                  <path class="f-stroke" d="M16 29l-5 5 5 5"/>
+                  <rect class="f-ink" x="42" y="31" width="36" height="6" rx="3"/>
+                  <rect class="f-dim" x="10" y="54" width="30" height="4" rx="2"/>
+                  <rect class="f-field" x="10.6" y="63.6" width="98.8" height="24" rx="7"/><rect class="f-ink" x="19" y="73" width="44" height="5" rx="2.5"/>
+                  <rect class="f-dim" x="10" y="98" width="22" height="4" rx="2"/>
+                  <rect class="f-field" x="10.6" y="107.6" width="98.8" height="24" rx="7"/><rect class="f-ink" x="19" y="117" width="30" height="5" rx="2.5"/>
+                  <rect class="f-dim" x="10" y="142" width="36" height="4" rx="2"/>
+                  <rect class="f-field" x="10.6" y="151.6" width="98.8" height="24" rx="7"/><rect class="f-ink" x="19" y="161" width="52" height="5" rx="2.5"/>
+                  <rect class="f-ink" x="10" y="192" width="46" height="22" rx="11"/><rect class="f-bgc" x="21" y="200.5" width="24" height="5" rx="2.5"/>
+                  <rect class="f-ink" x="42" y="247" width="36" height="3.5" rx="1.75" opacity=".8"/>
+                </svg>
+                <figcaption><b>#3 · 00:12.0</b>screen when this was said</figcaption>
+              </figure>
+              <figure class="frame">
+                <svg viewBox="0 0 120 258" role="img" aria-label="Drawn screenshot: the same form with a confirmation sheet open over its lower half.">
+                  <g opacity=".38">
+                    <rect class="f-dim" x="12" y="11" width="16" height="3.5" rx="1.75"/><rect class="f-dim" x="92" y="11" width="16" height="3.5" rx="1.75"/>
+                    <path class="f-stroke" d="M16 29l-5 5 5 5"/>
+                    <rect class="f-ink" x="42" y="31" width="36" height="6" rx="3"/>
+                    <rect class="f-dim" x="10" y="54" width="30" height="4" rx="2"/>
+                    <rect class="f-field" x="10.6" y="63.6" width="98.8" height="24" rx="7"/><rect class="f-ink" x="19" y="73" width="44" height="5" rx="2.5"/>
+                    <rect class="f-dim" x="10" y="98" width="22" height="4" rx="2"/>
+                    <rect class="f-field" x="10.6" y="107.6" width="98.8" height="24" rx="7"/><rect class="f-ink" x="19" y="117" width="30" height="5" rx="2.5"/>
+                  </g>
+                  <rect class="f-ink" x="0" y="0" width="120" height="258" opacity=".14"/>
+                  <path class="f-bgc" d="M0 152a14 14 0 0 1 14-14h92a14 14 0 0 1 14 14v106H0z"/>
+                  <rect class="f-dim" x="50" y="145" width="20" height="3.5" rx="1.75"/>
+                  <circle class="f-stroke" cx="60" cy="176" r="12"/><path class="f-stroke" d="M54.5 176.5l4 4 7-8.5"/>
+                  <rect class="f-ink" x="34" y="199" width="52" height="6" rx="3"/>
+                  <rect class="f-dim" x="24" y="211" width="72" height="4" rx="2"/>
+                  <rect class="f-fill" x="10" y="224" width="100" height="18" rx="9"/>
+                  <rect class="f-ink" x="42" y="247" width="36" height="3.5" rx="1.75" opacity=".8"/>
+                </svg>
+                <figcaption><b>#4 · 00:14.6</b>screen changed</figcaption>
+              </figure>
+            </div>
+          </div>
+        </div>
+
+        <div class="t-row">
+          <div class="t-left">
+            <div class="t-text">
+              <div class="t-time">00:16.4 - 00:20.9<small>(no speech)</small></div>
+              <div class="t-label">Said</div>
+              <p class="none">Nothing. The screen changed,<br> so it still gets a screenshot.</p>
+            </div>
+            <span class="t-wire" aria-hidden="true"></span>
+          </div>
+          <div class="t-right">
+            <div class="t-label">Screen</div>
+            <div class="t-frames">
+              <figure class="frame">
+                <svg viewBox="0 0 120 258" role="img" aria-label="Drawn screenshot: a list of three trip cards.">
+                  <rect class="f-dim" x="12" y="11" width="16" height="3.5" rx="1.75"/><rect class="f-dim" x="92" y="11" width="16" height="3.5" rx="1.75"/>
+                  <rect class="f-ink" x="10" y="30" width="40" height="10" rx="3"/>
+                  <circle class="f-fill" cx="102" cy="35" r="8"/>
+                  <rect class="f-fill" x="10" y="54" width="100" height="56" rx="9"/><rect class="f-ink" x="19" y="86" width="50" height="6" rx="3"/><rect class="f-dim" x="19" y="97" width="34" height="4" rx="2"/>
+                  <rect class="f-fill" x="10" y="118" width="100" height="56" rx="9"/><rect class="f-ink" x="19" y="150" width="38" height="6" rx="3"/><rect class="f-dim" x="19" y="161" width="46" height="4" rx="2"/>
+                  <rect class="f-fill" x="10" y="182" width="100" height="56" rx="9"/><rect class="f-ink" x="19" y="214" width="56" height="6" rx="3"/><rect class="f-dim" x="19" y="225" width="30" height="4" rx="2"/>
+                  <rect class="f-ink" x="42" y="247" width="36" height="3.5" rx="1.75" opacity=".8"/>
+                </svg>
+                <figcaption><b>#5 · 00:18.2</b>screen changed</figcaption>
+              </figure>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="note">A drawn example with invented content. The real file is Markdown, and the frames are JPEGs the agent opens.</p>
+    </div>
+  </section>
+
+  <section id="how" aria-labelledby="how-h">
+    <div class="wrap">
+      <h2 id="how-h">How it works</h2>
+      <p class="sub">Two parts: an iPhone app that records, and a Mac command-line tool your agent runs. There is no Mac app with a window.</p>
+
+      <div class="flow">
+        <div class="node">
+          <h3>iPhone</h3>
+          <p class="kind">ScreenBrief app, Swift</p>
+          <ol>
+            <li class="key">Record the whole screen and the microphone, in any app</li>
+            <li>Save the video to Photos</li>
+            <li>Transcribe on the phone</li>
+            <li>Copy</li>
+          </ol>
+        </div>
+        <div class="link"><span>paste</span><i></i></div>
+        <div class="node">
+          <h3>Thread</h3>
+          <p class="kind">where you talk to your agent</p>
+          <ol>
+            <li>The pasted text: a recording id, one command, your transcript</li>
+            <li>The video too, if you are away from the Mac</li>
+          </ol>
+        </div>
+        <div class="link"><span>agent runs one command</span><i></i></div>
+        <div class="node">
+          <h3>Mac</h3>
+          <p class="kind">screenbrief pull &lt;id&gt;</p>
+          <ol>
+            <li>Fetch the video from the iPhone or from the thread</li>
+            <li>Transcribe with Whisper</li>
+            <li>Pick a screenshot for each spoken phrase and each screen change</li>
+            <li>Write FEEDBACK.md and the frames</li>
+          </ol>
+        </div>
+        <div class="link"><span>FEEDBACK.md</span><i></i></div>
+        <div class="node">
+          <h3>Agent</h3>
+          <p class="kind">your coding agent</p>
+          <ol>
+            <li>Read the timeline</li>
+            <li>Open the frames</li>
+            <li>Make the changes</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="facts">
+        <div>
+          <h3>Two ways to get the video</h3>
+          <p>From the iPhone over Xcode's device pairing, when the phone is unlocked and on the same Wi-Fi as the Mac or plugged in. Or from a video you attached to the thread in T3 Code.</p>
+        </div>
+        <div>
+          <h3>No guessing</h3>
+          <p>If the agent cannot get the video, the pasted text tells it to wait and ask you. It is told not to work from the transcript alone.</p>
+        </div>
+        <div>
+          <h3>Any agent that can run a command</h3>
+          <p>It was built for <a href="https://github.com/pingdotgg/t3code">T3 Code</a> threads. The pasted text is plain, so any agent that can run a shell command on your Mac can use it.</p>
+        </div>
+        <div>
+          <h3>Optional touch overlay</h3>
+          <p>iOS does not show touches in a screen recording. A debug-only overlay for the app you are testing (React Native or SwiftUI) draws taps and finger trails so they show.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="install" aria-labelledby="install-h">
+    <div class="wrap">
+      <h2 id="install-h">What you need and how to install</h2>
+      <div class="install">
+        <ul class="needs">
+          <li>A Mac with Xcode<span>to build the app and reach the phone</span></li>
+          <li>An iPhone<span>and your own Apple developer team</span></li>
+          <li>Homebrew<span>for ffmpeg and whisper.cpp</span></li>
+          <li>Node 24<span>the tool has no npm dependencies</span></li>
+        </ul>
+        <div class="how">
+          <div>
+            <p class="stepno">Step 1</p>
+            <h3>Set up the Mac tool</h3>
+            <div class="code">
+              <button class="copy" type="button" hidden>Copy</button>
+              <pre id="cmds"><span class="cmd">git clone https://github.com/<wbr>RostyslavDzhohola/screenbrief.git</span><span class="cmd">cd screenbrief</span><span class="cmd">brew install ffmpeg whisper-cpp</span><span class="cmd">ln -s "$PWD/mac/bin/screenbrief" /opt/homebrew/bin/screenbrief</span><span class="cmd">screenbrief doctor</span></pre>
+            </div>
+            <p>The fourth line puts <code>mac/bin/screenbrief</code> on your PATH. <code>screenbrief doctor</code> checks ffmpeg, whisper.cpp, the Whisper model and Xcode's device tool, and says what is missing.</p>
+          </div>
+          <div>
+            <p class="stepno">Step 2</p>
+            <h3>Build the iPhone app</h3>
+            <p>Build the app in <code>ios/</code> with Xcode and install it on your iPhone. Set your own team and bundle ids first. It is not on the App Store.</p>
+            <p>The <a href="https://github.com/RostyslavDzhohola/screenbrief#readme">README</a> has the details: where the Whisper model goes, which signing settings to change, and every command.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="privacy" aria-labelledby="privacy-h">
+    <div class="wrap privacy">
+      <h2 id="privacy-h">Privacy</h2>
+      <div>
+        <p>Everything runs on your own iPhone and Mac. Transcription is on-device on the phone and local on the Mac.</p>
+        <p>Nothing is uploaded to a ScreenBrief server, because there is none. Your agent sees the text and frames you give it, like anything else in the thread.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="limits" aria-labelledby="limits-h">
+    <div class="wrap">
+      <h2 id="limits-h">Limits and what is in progress</h2>
+      <p class="sub">A personal tool made public. It is early.</p>
+      <div class="two">
+        <div class="card">
+          <h3>Today</h3>
+          <ul>
+            <li>iPhone and Mac only.</li>
+            <li>You build the iPhone app yourself with Xcode. <span>There is no packaged download.</span></li>
+            <li>Portrait recordings.</li>
+            <li>No touches in the recording, <span>unless the app you are testing includes the overlay.</span></li>
+            <li>A video you attach in T3 Code can be up to 50 MB, about 8 minutes. <span>Recordings are about 5.6 MB a minute.</span></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Being built <span class="tag">In progress</span></h3>
+          <ul>
+            <li>Splitting recordings longer than 8 minutes into parts that fit the attachment limit.</li>
+            <li>Fetching the video automatically later, when the phone was out of reach.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>MIT license · <a href="https://github.com/RostyslavDzhohola/screenbrief">Source on GitHub</a></span>
+    <span>Built for T3 Code threads; works with any agent that can run a command.</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var b = document.querySelector('.copy'), pre = document.getElementById('cmds');
+  if (!b || !pre || !navigator.clipboard) return;
+  b.hidden = false;
+  b.addEventListener('click', function () {
+    var text = Array.prototype.map.call(pre.querySelectorAll('.cmd'), function (c) { return c.textContent; }).join('\n');
+    navigator.clipboard.writeText(text).then(function () {
+      b.textContent = 'Copied';
+      setTimeout(function () { b.textContent = 'Copy'; }, 1600);
+    });
+  });
+})();
+</script>
+</body>
+</html>
