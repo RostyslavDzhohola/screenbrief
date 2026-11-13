@@ -26,7 +26,8 @@ the changes. If it cannot get the video it is told to wait for you rather than g
 next in reach of the Mac (unlocked, on the same Wi-Fi or plugged in), the Mac fetches and processes the
 recording by itself and sends the waiting T3 Code thread a message with the `FEEDBACK.md` path, so the
 agent carries on without you attaching anything. The check runs every two minutes and only reaches for
-the phone while something is waiting.
+the phone while something is waiting. Getting the video across with no shared network at all is
+[issue #4](https://github.com/RostyslavDzhohola/screenbrief/issues/4).
 
 ## How it works
 
@@ -119,8 +120,8 @@ brew install xcodegen                             # the script regenerates the p
 open ios/ScreenBrief.xcodeproj                    # pick your iPhone and Run
 ```
 
-`set-identity.sh` replaces the original bundle id prefix everywhere (project settings, entitlements,
-Swift sources, the Mac tool), sets your team, and switches to Xcode's automatic signing. It was checked
+`set-identity.sh` replaces the original bundle id prefix in the project's own files (project settings,
+entitlements, Swift sources, the Mac tool), sets your team, and switches to Xcode's automatic signing. It was checked
 by building the result for the simulator; signing with another account has not been tried by the author.
 
 From the command line, after editing `ios/project.yml`:
