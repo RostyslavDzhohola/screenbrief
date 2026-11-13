@@ -123,13 +123,13 @@ enum PhotoSource {
     static func candidates() -> [Candidate] {
         var found: [String: Candidate] = [:]
         if let album = RecordingAlbum.fetchAlbum() {
-            newest(PHAsset.fetchAssets(in: album, options: videoOptions()), limit: 200) { asset, name in
+            for (asset, name) in newest(PHAsset.fetchAssets(in: album, options: videoOptions()), limit: 200) {
                 found[asset.localIdentifier] = Candidate(asset: asset, source: "screenbrief", fileName: name)
             }
         }
         var screenRecordings = 0
-        newest(PHAsset.fetchAssets(with: .video, options: videoOptions()), limit: 60) { asset, name in
-            guard found[asset.localIdentifier] == nil else { return }
+        for (asset, name) in newest(PHAsset.fetchAssets(with: .video, options: videoOptions()), limit: 60)
+        where found[asset.localIdentifier] == nil {
             if name.hasPrefix(RecordingAlbum.filePrefix) {
                 found[asset.localIdentifier] = Candidate(asset: asset, source: "screenbrief", fileName: name)
             } else if asset.mediaSubtypes.contains(.videoScreenRecording),
@@ -142,21 +142,19 @@ enum PhotoSource {
         return found.values.sorted { ($0.asset.creationDate ?? .distantPast) > ($1.asset.creationDate ?? .distantPast) }
     }
 
-    /// Calls `body` with the newest `limit` videos that are not parts of a split recording. The
-    /// count is kept here and not as a fetch limit, which the parts would use up: a few long
+    /// The newest `limit` videos that are not parts of a split recording, with their file names.
+    /// The count is kept here and not as a fetch limit, which the parts would use up: a few long
     /// recordings would then hide every older one. At most ten times `limit` videos are looked at.
-    private static func newest(_ videos: PHFetchResult<PHAsset>, limit: Int, _ body: (PHAsset, String) -> Void) {
-        var taken = 0
+    private static func newest(_ videos: PHFetchResult<PHAsset>, limit: Int) -> [(PHAsset, String)] {
+        var taken: [(PHAsset, String)] = []
         var looked = 0
         videos.enumerateObjects { asset, _, stop in
             looked += 1
             let name = fileName(of: asset)
-            if !RecordingAlbum.isPart(fileName: name) {
-                body(asset, name)
-                taken += 1
-            }
-            if taken >= limit || looked >= limit * 10 { stop.pointee = true }
+            if !RecordingAlbum.isPart(fileName: name) { taken.append((asset, name)) }
+            if taken.count >= limit || looked >= limit * 10 { stop.pointee = true }
         }
+        return taken
     }
 
     private static func videoOptions() -> PHFetchOptions {
