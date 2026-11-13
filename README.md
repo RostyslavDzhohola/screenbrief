@@ -77,8 +77,8 @@ flowchart LR
   timeline entries.
 
 The extension and the app share no storage (there is no App Group): Photos is the hand-off, and a shared
-Keychain item carries the recorder's heartbeat and diagnostics. Nothing runs in the background on the
-Mac and there is no pairing step.
+Keychain item carries the recorder's heartbeat and diagnostics. There is no pairing step, and nothing
+runs in the background on the Mac unless you turn on the optional check with `screenbrief watch --install`.
 
 ## Limits
 
@@ -115,8 +115,8 @@ in `/opt/homebrew/bin` works). `screenbrief doctor` checks all of it.
 The app is not on the App Store: you build it with Xcode and your own Apple developer account.
 
 ```
+brew install xcodegen                             # first: the script uses it to regenerate the Xcode project
 scripts/set-identity.sh com.example ABCDE12345   # your bundle id prefix and 10-character team id
-brew install xcodegen                             # the script regenerates the project when it is installed
 open ios/ScreenBrief.xcodeproj                    # pick your iPhone and Run
 ```
 

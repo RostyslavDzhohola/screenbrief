@@ -7,6 +7,7 @@ import { loadConfig, ensureDirs, tools as toolPaths, paths, CLI_PATH } from './c
 import { processVideo, finishedFeedback } from './pipeline.mjs';
 import { probe, extractFrame } from './media.mjs';
 import { doctor } from './doctor.mjs';
+import { withLock } from './lock.mjs';
 import { rememberWaiter, settleWaiter, listWaiters, watchOnce, withWatchLock, watchInstalled, installWatch, uninstallWatch, watchPlistPath, WATCH_INTERVAL_SEC } from './watch.mjs';
 import { fmtTimeForName, readJsonSync, mapLimit } from './util.mjs';
 
@@ -137,8 +138,14 @@ async function cmdPull(args) {
         pulled = { id, moviePath: attached.file, meta: null, device: null };
       } else if (attached && attached.parts) {
         say(`joining the ${attached.total} attached parts`);
-        const joined = await joinParts(tools, attached.parts, path.join(staging, `${titleFor(id)}.mov`));
-        pulled = { id, moviePath: joined, meta: null, device: null };
+        try {
+          const joined = await joinParts(tools, attached.parts, path.join(staging, `${titleFor(id)}.mov`));
+          pulled = { id, moviePath: joined, meta: null, device: null };
+        } catch (e) {
+          // Reported like any other way of not getting the video, so the request is remembered.
+          attachProblem = `the ${attached.total} attached parts could not be joined (${String(e.message).split('\n')[0]}).`;
+          ask = `attach the ${attached.total} parts of ${titleFor(id)} from Photos (album "ScreenBrief") to the thread again`;
+        }
       } else if (attached && attached.missing) {
         const have = attached.total - attached.missing.length;
         const names = attached.missing.map((k) => `${titleFor(id)}-part${k}of${attached.total}`);
@@ -158,36 +165,47 @@ async function cmdPull(args) {
       return 2;
     }
     const outDir = bundleDirFor(pulled.id);
-    const done = finishedFeedback(outDir);
-    if (done && !args.force) {
-      say(`already processed; reusing ${outDir}`);
-      settle(pulled.id);
-      console.log(done);
-      return 0;
-    }
-    const m = pulled.meta || {};
-    const when = idTime(pulled.id);
-    const meta = {
-      id: pulled.id,
-      startedAt: m.startedAt || (when ? when.toISOString() : undefined),
-      durationSec: m.durationSec,
-      device: m.device || (pulled.device ? { name: pulled.device.name, model: pulled.device.model, os: '' } : undefined),
-      source: pulled.device ? 'phone' : 'attachment',
-      hasMicAudio: m.hasMicAudio,
-    };
-    const started = Date.now();
-    const bundle = await processVideo(pulled.moviePath, { outDir, cfg, meta, id: pulled.id, onStatus: (s) => say(s.stage) });
-    say(
-      `${bundle.frames.length} frames, ${bundle.transcript.phrases.length} phrases, audio: ${bundle.transcript.audio.state}, ` +
-        `${((Date.now() - started) / 1000).toFixed(1)}s for a ${bundle.durationSec.toFixed(1)}s recording`,
+    // One process at a time works on a recording's bundle: the watcher and a pull run by hand
+    // would otherwise delete each other's frames and temporary files.
+    return await withLock(
+      path.join(paths().home, 'locks', `${pulled.id}.lock`),
+      () => processPulled(pulled, outDir, { args, cfg, say }),
+      { waitMs: 45 * 60_000, onWait: () => say(`another screenbrief is processing ${pulled.id}; waiting for it`) },
     );
-    // Only now: had processing failed, the request stays and the watcher tries again.
-    settle(pulled.id);
-    console.log(bundle.feedbackPath);
-    return 0;
   } finally {
     await fsp.rm(staging, { recursive: true, force: true });
   }
+}
+
+async function processPulled(pulled, outDir, { args, cfg, say }) {
+  // Looked at under the lock: the process waited for may have just finished it.
+  const done = finishedFeedback(outDir);
+  if (done && !args.force) {
+    say(`already processed; reusing ${outDir}`);
+    settle(pulled.id);
+    console.log(done);
+    return 0;
+  }
+  const m = pulled.meta || {};
+  const when = idTime(pulled.id);
+  const meta = {
+    id: pulled.id,
+    startedAt: m.startedAt || (when ? when.toISOString() : undefined),
+    durationSec: m.durationSec,
+    device: m.device || (pulled.device ? { name: pulled.device.name, model: pulled.device.model, os: '' } : undefined),
+    source: pulled.device ? 'phone' : 'attachment',
+    hasMicAudio: m.hasMicAudio,
+  };
+  const started = Date.now();
+  const bundle = await processVideo(pulled.moviePath, { outDir, cfg, meta, id: pulled.id, onStatus: (s) => say(s.stage) });
+  say(
+    `${bundle.frames.length} frames, ${bundle.transcript.phrases.length} phrases, audio: ${bundle.transcript.audio.state}, ` +
+      `${((Date.now() - started) / 1000).toFixed(1)}s for a ${bundle.durationSec.toFixed(1)}s recording`,
+  );
+  // Only now: had processing failed, the request stays and the watcher tries again.
+  settle(pulled.id);
+  console.log(bundle.feedbackPath);
+  return 0;
 }
 
 /**

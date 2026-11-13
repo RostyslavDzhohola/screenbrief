@@ -144,7 +144,8 @@ test('watch: a pull by hand that fails while processing keeps the request', asyn
 });
 
 // ---- races, with the watcher's functions called directly -----------------------------------------
-import { rememberWaiter, settleWaiter, watchOnce, withWatchLock, waitingDir } from '../src/watch.mjs';
+import { rememberWaiter, forgetWaiter, settleWaiter, watchOnce, withWatchLock, waitingDir } from '../src/watch.mjs';
+import { tryLock } from '../src/lock.mjs';
 import { spawn } from 'node:child_process';
 
 async function inHome(fn) {
@@ -240,6 +241,98 @@ test('watch: of several passes started together, exactly one runs', async () => 
     assert.equal(fs.readFileSync(log, 'utf8').trim().split('\n').length, 1, fs.readFileSync(log, 'utf8'));
     assert.equal(fs.existsSync(path.join(home, 'waiting', '.lock')), false);
   });
+});
+
+test('watch: a request written just before the delivered one is deleted is kept', async () => {
+  await inHome(async (home) => {
+    const first = rememberWaiter(ID, { threadId: 'thread-a' });
+    const second = rememberWaiter(ID, { threadId: 'thread-b' });
+    // The pass still holds the first revision's token: the newer request must survive.
+    assert.equal(forgetWaiter(ID, first.token), false);
+    assert.equal(waiter(home).threadId, 'thread-b');
+    assert.equal(waiter(home).token, second.token);
+    assert.equal(forgetWaiter(ID, second.token), true);
+    assert.equal(forgetWaiter(ID, second.token), false);
+    assert.deepEqual(fs.readdirSync(path.join(home, 'waiting')), []);
+  });
+});
+
+test('watch: a pull that throws does not hold up the other requests', async () => {
+  await inHome(async () => {
+    rememberWaiter('20261112-100000', { threadId: 'thread-a', now: Date.now() - 60_000 });
+    rememberWaiter('20261112-110000', { threadId: 'thread-b' });
+    const told = [];
+    const res = await watchOnce({
+      pull: async (id) => {
+        if (id === '20261112-100000') throw new Error('node timed out after 1800s');
+        return { ok: true, feedbackPath: '/x/FEEDBACK.md' };
+      },
+      notify: async (w) => told.push(w.threadId),
+    });
+    assert.deepEqual(res.map((r) => r.state), ['waiting', 'delivered']);
+    assert.match(res[0].detail, /timed out/);
+    assert.deepEqual(told, ['thread-b']);
+  });
+});
+
+test('watch: an abandoned lock is replaced by one pass only, and a live lock is never removed', async () => {
+  await inHome(async (home) => {
+    const file = path.join(home, 'waiting', '.lock');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now(), token: 'gone' }));
+    // Another process is in the middle of replacing it: this one steps back.
+    fs.writeFileSync(`${file}.replacing`, '1');
+    assert.equal(tryLock(file), null);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, 'gone');
+    fs.rmSync(`${file}.replacing`);
+    const release = tryLock(file);
+    assert.equal(typeof release, 'function');
+    // Held by this (live) process now: nobody else gets it or removes it.
+    assert.equal(tryLock(file), null);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).pid, process.pid);
+    release();
+    assert.equal(fs.existsSync(file), false);
+  });
+});
+
+test('watch: two pulls of one recording do not process it at the same time', async () => {
+  const { home, attachments, env } = await setup();
+  attach(attachments, ID);
+  const [a, b] = await Promise.all([cli(['pull', ID], env), cli(['pull', ID], env)]);
+  const feedback = path.join(home, 'recordings', `phone-${ID}`, 'FEEDBACK.md');
+  assert.equal(a.stdout.trim().split('\n').pop(), feedback);
+  assert.equal(b.stdout.trim().split('\n').pop(), feedback);
+  // One processed it; the other waited and reused the result.
+  const both = a.stderr + b.stderr;
+  assert.equal((both.match(/already processed; reusing/g) || []).length, 1, both);
+  assert.match(both, /another screenbrief is processing/);
+  assert.deepEqual(fs.readdirSync(path.join(home, 'locks')), []);
+});
+
+test('watch: attached parts that cannot be joined are reported, and the request is remembered', async () => {
+  const { home, attachments, env } = await setup();
+  for (const k of [1, 2]) {
+    execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=64x128:d=1', '-pix_fmt', 'yuv420p', '-metadata', `title=${titleFor(ID)}-part${k}of2`, path.join(attachments, `p${k}.mov`)]);
+  }
+  // ffmpeg is replaced by something that fails, after the parts were found with the real ffprobe.
+  const r = await cli(['pull', ID], { ...env, SCREENBRIEF_FFMPEG: '/usr/bin/false' }, { allowFail: true });
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /the 2 attached parts could not be joined/);
+  assert.match(r.stderr, /do not work from the transcript alone/);
+  assert.equal(waiter(home).threadId, 'thread-123');
+});
+
+test('watch: settings in force at install reach the background check', async () => {
+  const { watchPlistXml } = await import('../src/watch.mjs');
+  const before = process.env.SCREENBRIEF_T3_ATTACHMENTS;
+  process.env.SCREENBRIEF_T3_ATTACHMENTS = '/Volumes/Other/attachments';
+  try {
+    assert.match(watchPlistXml(), /<key>SCREENBRIEF_T3_ATTACHMENTS<\/key>\s*<string>\/Volumes\/Other\/attachments<\/string>/);
+  } finally {
+    if (before === undefined) delete process.env.SCREENBRIEF_T3_ATTACHMENTS;
+    else process.env.SCREENBRIEF_T3_ATTACHMENTS = before;
+  }
+  assert.doesNotMatch(watchPlistXml(), /SCREENBRIEF_T3_ATTACHMENTS/);
 });
 
 test('watch: the launchd job runs `screenbrief watch` every two minutes and is valid', async () => {

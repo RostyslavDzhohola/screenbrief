@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { run, readJsonSync, BIN_PATH_PREFIX } from './util.mjs';
 import { paths, CLI_PATH, PACKAGE_DIR } from './config.mjs';
+import { tryLock } from './lock.mjs';
 
 export const WATCH_LABEL = 'com.screenbrief.watch';
 export const WATCH_INTERVAL_SEC = 120;
@@ -44,14 +45,35 @@ export function rememberWaiter(id, { threadId = null, t3Bin = null, now = Date.n
   return waiter;
 }
 
-/** Forgets the request for `id`. With `token`, only if that revision is still the current one. */
+/**
+ * Forgets the request for `id`. With `token`, only if that revision is still the current one.
+ *
+ * Another process may write a newer request at any moment, so the file is not compared and then
+ * deleted. It is moved aside in one step and looked at there: the revision meant is deleted, and
+ * any other is put back (unless a still newer one has been written, which then stands).
+ */
 export function forgetWaiter(id, token) {
-  if (token !== undefined) {
-    const now = readWaiter(id);
-    if (!now || (now.token || null) !== (token || null)) return false;
+  if (token === undefined) {
+    fs.rmSync(waiterFile(id), { force: true });
+    return true;
   }
-  fs.rmSync(waiterFile(id), { force: true });
-  return true;
+  const aside = `${waiterFile(id)}.${crypto.randomUUID()}.taking`;
+  try {
+    fs.renameSync(waiterFile(id), aside);
+  } catch {
+    return false; // nothing waiting
+  }
+  const got = readJsonSync(aside, null);
+  const meant = !!got && (got.token || null) === (token || null);
+  if (!meant) {
+    try {
+      fs.linkSync(aside, waiterFile(id)); // never over an existing file
+    } catch {
+      /* a newer request is there already */
+    }
+  }
+  fs.rmSync(aside, { force: true });
+  return meant;
 }
 
 /**
@@ -75,6 +97,15 @@ export function listWaiters({ now = Date.now() } = {}) {
   }
   const out = [];
   for (const n of names) {
+    if (/\.(tmp|taking)$/.test(n)) {
+      // Left by a process that died between two steps.
+      try {
+        if (now - fs.statSync(path.join(waitingDir(), n)).mtimeMs > 3600_000) fs.rmSync(path.join(waitingDir(), n), { force: true });
+      } catch {
+        /* gone */
+      }
+      continue;
+    }
     if (!n.endsWith('.json')) continue;
     const w = readJsonSync(path.join(waitingDir(), n), null);
     if (!w || !ID_RE.test(String(w.id)) || `${w.id}.json` !== n) continue;
@@ -123,7 +154,14 @@ async function notifyThread(waiter, feedbackPath) {
 export async function watchOnce({ pull = pullChild, notify = notifyThread, log = () => {}, now = Date.now() } = {}) {
   const results = [];
   for (const w of listWaiters({ now })) {
-    const got = await pull(w.id);
+    let got;
+    try {
+      got = await pull(w.id);
+    } catch (e) {
+      // One recording that cannot be pulled (a timeout, a crash) does not hold up the others.
+      got = { ok: false, detail: e.message };
+      log(`${w.id}: the pull failed: ${e.message}`);
+    }
     if (!got.ok) {
       results.push({ id: w.id, state: 'waiting', detail: got.detail });
       continue;
@@ -155,61 +193,14 @@ export async function watchOnce({ pull = pullChild, notify = notifyThread, log =
   return results;
 }
 
-const LOCK_MAX_AGE_MS = 6 * 3600_000;
-
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === 'EPERM';
-  }
-}
-
-/**
- * Runs `fn` unless another pass is running; returns null then. The lock file is created
- * exclusively, so two passes starting together cannot both get it, and it is removed only by the
- * pass that owns it. A lock whose process is gone (or that is over six hours old) is taken over.
- */
+/** Runs `fn` unless another pass is running; returns null then. */
 export async function withWatchLock(fn) {
-  fs.mkdirSync(waitingDir(), { recursive: true });
-  const lock = path.join(waitingDir(), '.lock');
-  const mine = { pid: process.pid, at: Date.now(), token: crypto.randomUUID() };
-  const take = () => {
-    try {
-      fs.writeFileSync(lock, JSON.stringify(mine), { flag: 'wx' });
-      return true;
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      return false;
-    }
-  };
-  if (!take()) {
-    const held = readJsonSync(lock, null);
-    let age = Infinity;
-    try {
-      age = Date.now() - fs.statSync(lock).mtimeMs;
-    } catch {
-      /* gone again */
-    }
-    // A lock just created may not have its contents yet: it counts as held.
-    const live = held ? pidAlive(held.pid) && age < LOCK_MAX_AGE_MS : age < 10_000;
-    if (live) return null;
-    // Stale. Moving it aside succeeds for one process only; the others see ENOENT and step back.
-    const aside = `${lock}.${mine.token}.stale`;
-    try {
-      fs.renameSync(lock, aside);
-    } catch {
-      return null;
-    }
-    fs.rmSync(aside, { force: true });
-    if (!take()) return null;
-  }
+  const release = tryLock(path.join(waitingDir(), '.lock'));
+  if (!release) return null;
   try {
     return await fn();
   } finally {
-    const now = readJsonSync(lock, null);
-    if (now && now.token === mine.token) fs.rmSync(lock, { force: true });
+    release();
   }
 }
 
@@ -229,9 +220,22 @@ function nodePath() {
   return ['/opt/homebrew/bin/node', '/usr/local/bin/node'].find((p) => fs.existsSync(p)) || process.execPath;
 }
 
+const KEPT_SETTINGS = [
+  'SCREENBRIEF_T3_ATTACHMENTS',
+  'SCREENBRIEF_T3_BIN',
+  'SCREENBRIEF_NO_PHONE',
+  'SCREENBRIEF_FFMPEG',
+  'SCREENBRIEF_FFPROBE',
+  'SCREENBRIEF_WHISPER_BIN',
+  'SCREENBRIEF_MODEL',
+  'SCREENBRIEF_TOUCH_DETECT',
+];
+
 export function watchPlistXml() {
   const env = { PATH: BIN_PATH_PREFIX, HOME: os.homedir() };
   if (process.env.SCREENBRIEF_HOME) env.SCREENBRIEF_HOME = paths().home;
+  // Settings in force when it is installed apply to the background check too.
+  for (const k of KEPT_SETTINGS) if (process.env[k]) env[k] = process.env[k];
   const envXml = Object.entries(env).map(([k, v]) => `      <key>${xml(k)}</key>\n      <string>${xml(v)}</string>`).join('\n');
   const logFile = path.join(paths().home, 'watch.log');
   return `<?xml version="1.0" encoding="UTF-8"?>
