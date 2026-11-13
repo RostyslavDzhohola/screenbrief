@@ -5,8 +5,8 @@
 #   scripts/set-identity.sh <bundle-prefix> <team-id>
 #   scripts/set-identity.sh com.example ABCDE12345
 #
-# It replaces the original prefix everywhere it appears (project settings, entitlements, the
-# Swift sources and the Mac tool), sets the team, and switches signing from named provisioning
+# It replaces the original prefix in the project's own files (project settings, entitlements,
+# the Swift sources and the Mac tool), sets the team, and switches signing from named provisioning
 # profiles to Xcode's automatic signing. Then it regenerates the Xcode project if `xcodegen`
 # is installed (brew install xcodegen).
 set -eu
@@ -31,10 +31,15 @@ OLD=$(sed -n 's/^  bundleIdPrefix: *//p' ios/project.yml)
 [ -n "$OLD" ] || { echo "could not read bundleIdPrefix from ios/project.yml" >&2; exit 1; }
 OLD_RE=$(printf '%s' "$OLD" | sed 's/\./\\./g')
 
-FILES=$(grep -rlE "$OLD_RE" ios mac --include='*.yml' --include='*.swift' --include='*.mjs' --include='*.entitlements' --include='*.plist' | grep -v '^ios/build/' || true)
-for f in $FILES; do
-  OLD_RE="$OLD_RE" PREFIX="$PREFIX" perl -pi -e 's/$ENV{OLD_RE}/$ENV{PREFIX}/g' "$f"
-done
+# Only files that belong to the project (tracked by git) and only the project's own identifiers:
+# "<prefix>.screenbrief..." and the bundleIdPrefix line. Build output, package checkouts and
+# other identifiers that merely start with the same letters are left alone.
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "run this inside a git clone of the repository" >&2; exit 1; }
+git grep -lzE "$OLD_RE(\\.screenbrief|\$)" -- 'ios/*.yml' 'ios/*.swift' 'ios/*.entitlements' 'ios/*.plist' 'mac/src/*.mjs' |
+  OLD_RE="$OLD_RE" PREFIX="$PREFIX" xargs -0 perl -pi -e '
+    s/(?<![A-Za-z0-9-])$ENV{OLD_RE}(?=\.screenbrief)/$ENV{PREFIX}/g;
+    s/^(\s*bundleIdPrefix:\s*)$ENV{OLD_RE}\s*$/$1$ENV{PREFIX}\n/;
+  '
 
 TEAM="$TEAM" perl -ni -e '
   next if /CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]/;
