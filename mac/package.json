@@ -2,7 +2,7 @@
   "name": "screenbrief",
   "version": "1.0.0",
   "private": true,
-  "description": "Turns iPhone screen recordings with spoken feedback into a frames-plus-transcript bundle for a coding agent, and delivers it to a T3 Code thread.",
+  "description": "Turns an iPhone screen recording with spoken feedback into a timeline a coding agent can read: what was said next to screenshots of the screen at each moment.",
   "type": "module",
   "bin": {
     "screenbrief": "bin/screenbrief"
@@ -11,7 +11,6 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/*.test.mjs",
-    "serve": "node bin/screenbrief serve"
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
   }
 }

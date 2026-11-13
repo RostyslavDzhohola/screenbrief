@@ -120,6 +120,17 @@ test('all-silent audio track: no invented text, frames-only bundle', async () =>
   assert.doesNotMatch(md, /Thank you|BLANK_AUDIO/i);
 });
 
+test('processing again into a finished bundle and failing leaves no FEEDBACK.md to mistake for a result', async () => {
+  const out = path.join(home, 'noaudio-bundle'); // finished by the test above
+  assert.ok(fs.existsSync(path.join(out, 'FEEDBACK.md')));
+  const broken = path.join(home, 'broken.mov');
+  fs.writeFileSync(broken, 'this is not a movie');
+  const r = await cli(['process', broken, '--out', out], env, { allowFail: true });
+  assert.notEqual(r.code, 0);
+  assert.equal(readJson(path.join(out, 'status.json')).state, 'failed');
+  assert.equal(fs.existsSync(path.join(out, 'FEEDBACK.md')), false);
+});
+
 test('a missing input fails cleanly with a non-zero exit', async () => {
   const r = await cli(['process', path.join(home, 'nope.mov'), '--out', path.join(home, 'nope')], env, { allowFail: true });
   assert.notEqual(r.code, 0);

@@ -169,6 +169,8 @@ struct MovieInfo: CustomStringConvertible {
     var audioDuration: Double = 0
     var videoSampleCount = 0
     var decodedFrame = false
+    /// The title in the movie's common metadata, if it has one.
+    var title: String?
 
     var description: String {
         String(format: "readable=%@ duration=%.3f video=%@ %dx%d samples=%d vStart=%.3f vDur=%.3f audio=%@ aStart=%.3f aDur=%.3f transformIdentity=%@ decoded=%@",
@@ -182,6 +184,8 @@ struct MovieInfo: CustomStringConvertible {
         let (readable, duration) = try await asset.load(.isReadable, .duration)
         info.isReadable = readable
         info.duration = duration.seconds
+        let titles = AVMetadataItem.metadataItems(from: try await asset.load(.commonMetadata), filteredByIdentifier: .commonIdentifierTitle)
+        info.title = try await titles.first?.load(.stringValue)
         if let v = try await asset.loadTracks(withMediaType: .video).first {
             info.hasVideoTrack = true
             let (size, transform, range) = try await v.load(.naturalSize, .preferredTransform, .timeRange)

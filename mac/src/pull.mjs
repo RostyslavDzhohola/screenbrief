@@ -22,7 +22,9 @@ export class PullError extends Error {}
 async function devicectl(args, { timeoutMs = 120_000 } = {}) {
   const tmp = path.join(os.tmpdir(), `screenbrief-devicectl-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   try {
-    const r = await run(DEVICECTL[0], [DEVICECTL[1], ...args, '--json-output', tmp], { timeoutMs, allowFail: true });
+    // SCREENBRIEF_DEVICECTL names a script that stands in for devicectl (the tests have no phone).
+    const cmd = process.env.SCREENBRIEF_DEVICECTL ? [process.execPath, process.env.SCREENBRIEF_DEVICECTL] : DEVICECTL;
+    const r = await run(cmd[0], [cmd[1], ...args, '--json-output', tmp], { timeoutMs, allowFail: true });
     let json = null;
     try {
       json = JSON.parse(await fsp.readFile(tmp, 'utf8'));
@@ -81,7 +83,7 @@ export function chooseRecording(names, id) {
 /**
  * Copies recording `id` from the phone into `destDir`. Returns { id, moviePath, meta, device }.
  */
-export async function pullRecording(id, { device: wanted, destDir, log = () => {} } = {}) {
+export async function pullRecording(id, { device: wanted, destDir, log = () => {}, sidecarRetries = 5, sidecarWaitMs = 3000 } = {}) {
   if (id !== 'latest' && !ID_RE.test(id)) throw new PullError(`"${id}" is not a recording id (letters, digits and dashes), nor "latest".`);
   const list = await devicectl(['list', 'devices'], { timeoutMs: 60_000 });
   const devices = pickDevices(list.json, wanted);
@@ -108,6 +110,19 @@ export async function pullRecording(id, { device: wanted, destDir, log = () => {
       continue;
     }
     const realId = movie.replace(MOVIE_RE, '');
+    // The app writes <id>.json once its copy of the movie is complete. Without it the movie may
+    // still be on its way out of Photos, and a partial file would process into a short bundle.
+    let complete = names.includes(`${realId}.json`);
+    for (let attempt = 0; !complete && attempt < sidecarRetries; attempt++) {
+      log(`${movie} is still being copied out of Photos on the phone; waiting`);
+      await new Promise((r) => setTimeout(r, sidecarWaitMs));
+      const again = await devicectl(['device', 'info', 'files', ...domain]);
+      complete = again.code === 0 && fileNames(again.json).includes(`${realId}.json`);
+    }
+    if (!complete) {
+      lastProblem = `${device.name}: ScreenBrief has not finished saving recording ${realId} (its copy from Photos is incomplete). Open ScreenBrief on the iPhone, wait until the recording shows in the list, then run this again.`;
+      continue;
+    }
     await fsp.mkdir(destDir, { recursive: true });
     const moviePath = path.join(destDir, movie);
     log(`copying ${movie} from ${device.name}`);
@@ -116,17 +131,28 @@ export async function pullRecording(id, { device: wanted, destDir, log = () => {
       lastProblem = `${device.name}: copying ${movie} failed: ${firstLine(copy.stderr || copy.stdout)}`;
       continue;
     }
+    // The sidecar holds the movie's size. Without it the copy cannot be checked, so it is not used.
     let meta = null;
-    if (names.includes(`${realId}.json`)) {
-      const metaPath = path.join(destDir, `${realId}.json`);
+    const metaPath = path.join(destDir, `${realId}.json`);
+    for (let attempt = 0; !meta && attempt < 2; attempt++) {
       const m = await devicectl(['device', 'copy', 'from', ...domain, '--source', `${PHONE_DIR}/${realId}.json`, '--destination', metaPath]);
-      if (m.code === 0) {
-        try {
-          meta = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
-        } catch {
-          meta = null;
-        }
+      if (m.code !== 0) continue;
+      try {
+        const parsed = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
+        if (parsed && typeof parsed === 'object') meta = parsed;
+      } catch {
+        /* the app may be rewriting it; tried once more */
       }
+    }
+    if (!meta) {
+      lastProblem = `${device.name}: could not read the details of recording ${realId} from ScreenBrief, so the copy of ${movie} cannot be checked. Keep the iPhone unlocked and near the Mac, then run this again.`;
+      continue;
+    }
+    // The app records the movie's size; a copy that came out shorter was cut off on the way.
+    const got = fs.statSync(moviePath).size;
+    if (Number(meta.sizeBytes) > 0 && got !== Number(meta.sizeBytes)) {
+      lastProblem = `${device.name}: the copy of ${movie} is incomplete (${got} of ${meta.sizeBytes} bytes). Keep the iPhone unlocked and near the Mac, then run this again.`;
+      continue;
     }
     return { id: realId, moviePath, meta, device };
   }
@@ -151,25 +177,42 @@ export function idTime(id) {
   return Number.isNaN(t.getTime()) ? null : t;
 }
 
+/** Where T3 Code keeps the files attached to threads (SCREENBRIEF_T3_ATTACHMENTS overrides). */
+export function attachmentsDir() {
+  return process.env.SCREENBRIEF_T3_ATTACHMENTS || path.join(os.homedir(), '.t3', 'userdata', 'attachments');
+}
+
+/** The title the phone app writes into each movie: "ScreenBrief-<id>". */
+export const titleFor = (id) => `ScreenBrief-${id}`;
+
 /**
- * The recording as a file the user attached in T3 Code (it stores attachments under
- * ~/.t3/userdata/attachments with generated names). The phone stamps each movie with its start
- * time, which is also its id, so the match is on that timestamp.
+ * A recording too large to attach in one file is attached as parts titled
+ * "ScreenBrief-<id>-part<k>of<n>". Returns { part, total } for such a title of `id`, else null.
  */
-export async function findAttachedVideo(id, { attachmentsDir = path.join(os.homedir(), '.t3', 'userdata', 'attachments'), tools, maxAgeDays = 30, toleranceSec = 3 } = {}) {
-  const want = idTime(id);
-  if (!want) return null;
+export function partOf(title, id) {
+  const prefix = `${titleFor(id)}-part`.toLowerCase();
+  const t = String(title || '').trim().toLowerCase();
+  if (!t.startsWith(prefix)) return null;
+  const m = /^(\d{1,2})of(\d{1,2})$/.exec(t.slice(prefix.length));
+  if (!m) return null;
+  const part = Number(m[1]);
+  const total = Number(m[2]);
+  return part >= 1 && total >= 2 && part <= total ? { part, total } : null;
+}
+
+/** Movies among the T3 Code attachments, newest first, each with its tags. */
+async function scanAttachments(dir, tools, maxAgeDays) {
   let names;
   try {
-    names = await fsp.readdir(attachmentsDir);
+    names = await fsp.readdir(dir);
   } catch {
-    return null;
+    return [];
   }
   const cutoff = Date.now() - maxAgeDays * 86_400_000;
   const candidates = [];
   for (const n of names) {
     if (!MOVIE_RE.test(n)) continue;
-    const file = path.join(attachmentsDir, n);
+    const file = path.join(dir, n);
     try {
       const st = await fsp.stat(file);
       if (st.isFile() && st.size > 0 && st.mtimeMs >= cutoff) candidates.push({ file, mtimeMs: st.mtimeMs });
@@ -178,16 +221,84 @@ export async function findAttachedVideo(id, { attachmentsDir = path.join(os.home
     }
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const movies = [];
   for (const c of candidates.slice(0, 200)) {
     try {
-      const r = await run(tools.ffprobe, ['-v', 'error', '-print_format', 'json', '-show_entries', 'format_tags=creation_time:stream=codec_type', c.file], { timeoutMs: 30_000 });
+      const r = await run(tools.ffprobe, ['-v', 'error', '-print_format', 'json', '-show_entries', 'format_tags:stream=codec_type', c.file], { timeoutMs: 30_000 });
       const info = JSON.parse(r.stdout);
-      const created = Date.parse((info.format && info.format.tags && info.format.tags.creation_time) || '');
-      const hasVideo = (info.streams || []).some((st) => st.codec_type === 'video');
-      if (hasVideo && Number.isFinite(created) && Math.abs(created - want.getTime()) <= toleranceSec * 1000) return c.file;
+      if (!(info.streams || []).some((st) => st.codec_type === 'video')) continue;
+      const tags = (info.format && info.format.tags) || {};
+      movies.push({ file: c.file, titles: Object.values(tags).map((v) => String(v).trim().toLowerCase()), created: Date.parse(tags.creation_time || '') });
     } catch {
       /* not a readable movie */
     }
   }
-  return null;
+  return movies;
+}
+
+/**
+ * The recording among the files the user attached in T3 Code (it stores attachments under
+ * ~/.t3/userdata/attachments with generated names). Returns null, or one of:
+ *   { file }                      the whole recording, recognised by
+ *                                 1. its title tag "ScreenBrief-<id>" (exact; newer app builds), or
+ *                                 2. its creation time being the id's time (the phone's local
+ *                                    time, read in this Mac's time zone) within `toleranceSec`;
+ *                                    the closest one wins.
+ *   { parts: [files], total }     every part of a recording that was attached in parts, in order
+ *   { missing: [k], total }       some parts are attached, these are not
+ * Of several copies of the same file, the most recently attached is used.
+ */
+export async function findAttached(id, { attachmentsDir: dir = attachmentsDir(), tools, maxAgeDays = 30, toleranceSec = 3 } = {}) {
+  if (!ID_RE.test(String(id))) return null;
+  const movies = await scanAttachments(dir, tools, maxAgeDays);
+  const title = titleFor(id).toLowerCase();
+  const whole = movies.find((m) => m.titles.includes(title));
+  if (whole) return { file: whole.file };
+
+  // Parts: the set the newest part belongs to (a recording is only ever split one way, but be exact).
+  const parts = [];
+  for (const m of movies) {
+    const p = m.titles.map((t) => partOf(t, id)).find(Boolean);
+    if (p) parts.push({ ...p, file: m.file });
+  }
+  if (parts.length) {
+    const total = parts[0].total;
+    const files = [];
+    const missing = [];
+    for (let k = 1; k <= total; k++) {
+      const hit = parts.find((p) => p.total === total && p.part === k); // newest first
+      if (hit) files.push(hit.file);
+      else missing.push(k);
+    }
+    return missing.length ? { missing, total } : { parts: files, total };
+  }
+
+  const want = idTime(id);
+  if (!want) return null;
+  let best = null;
+  for (const m of movies) {
+    if (!Number.isFinite(m.created)) continue;
+    const off = Math.abs(m.created - want.getTime());
+    if (off <= toleranceSec * 1000 && (!best || off < best.off)) best = { file: m.file, off };
+  }
+  return best ? { file: best.file } : null;
+}
+
+/** The whole recording as one attached file, or null (see findAttached). */
+export async function findAttachedVideo(id, opts = {}) {
+  const found = await findAttached(id, opts);
+  return found && found.file ? found.file : null;
+}
+
+/** Joins the parts of a recording, in order, into one movie at `out` (no re-encoding). */
+export async function joinParts(tools, files, out) {
+  const listFile = `${out}.parts.txt`;
+  await fsp.mkdir(path.dirname(out), { recursive: true });
+  await fsp.writeFile(listFile, files.map((f) => `file '${f.replace(/'/g, "'\\''")}'\n`).join(''));
+  try {
+    await run(tools.ffmpeg, ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', out], { timeoutMs: 600_000 });
+  } finally {
+    await fsp.rm(listFile, { force: true });
+  }
+  return out;
 }

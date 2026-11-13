@@ -1,34 +1,32 @@
-// Command-line interface: serve, process, frames, threads, send, pair, doctor,
-// install-service, uninstall-service.
-import { pullRecording, PullError, bundleDirFor, findAttachedVideo, idTime } from './pull.mjs';
+// Command-line interface: pull, process, frames, watch, doctor.
+import { pullRecording, PullError, bundleDirFor, findAttached, joinParts, idTime, titleFor } from './pull.mjs';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { loadConfig, ensureDirs, tools as toolPaths, paths, CLI_PATH } from './config.mjs';
-import { processVideo, loadBundle } from './pipeline.mjs';
+import { processVideo, finishedFeedback } from './pipeline.mjs';
 import { probe, extractFrame } from './media.mjs';
-import { T3 } from './t3.mjs';
-import { deliverBundle } from './deliver.mjs';
-import { pairingInfo, qrTerminal, qrPng, createPairCode } from './net.mjs';
-import { installService, uninstallService } from './service.mjs';
 import { doctor } from './doctor.mjs';
-import { fmtTimeForName, readJsonSync, writeJsonAtomic, mapLimit } from './util.mjs';
+import { withLock } from './lock.mjs';
+import { rememberWaiter, settleWaiter, listWaiters, watchOnce, withWatchLock, watchInstalled, installWatch, uninstallWatch, watchPlistPath, WATCH_INTERVAL_SEC } from './watch.mjs';
+import { fmtTimeForName, readJsonSync, mapLimit } from './util.mjs';
 
-const HELP = `screenbrief: phone screen recordings with spoken feedback -> agent-readable bundles
+const HELP = `screenbrief: phone screen recordings with spoken feedback -> a timeline an agent can read
 
 Usage:
-  screenbrief serve [--port <n>] [--no-bonjour]
   screenbrief pull <recording id | latest> [--device <name>] [--no-phone] [--force]
-      get a recording (from the iPhone, or the video attached in T3 Code) and process it
+      get a recording (from the iPhone, or the video attached in T3 Code), process it,
+      and print the path of its FEEDBACK.md
   screenbrief process <video> [--out <dir>] [--note <text>]
-  screenbrief frames <bundle dir> --at <sec> [--at <sec> ...]
-  screenbrief frames <bundle dir> --from <sec> --to <sec> [--fps <n>]
-  screenbrief threads [--json]
-  screenbrief send <recording id | bundle dir> (--thread <id> | --project <path>) [--note <text>]
-  screenbrief pair
+      process any video file the same way
+  screenbrief frames <bundle dir | recording id> --at <sec> [--at <sec> ...]
+  screenbrief frames <bundle dir | recording id> --from <sec> --to <sec> [--fps <n>]
+      extra frames around a moment
+  screenbrief watch [--install | --uninstall | --status]
+      fetch recordings that a pull could not get, once the iPhone is in reach again, and tell the
+      thread that asked. --install runs it every two minutes in the background.
   screenbrief doctor
-  screenbrief install-service [--dry-run]
-  screenbrief uninstall-service
+      check ffmpeg, whisper and the rest
 
 Data: ${paths().home} (override with SCREENBRIEF_HOME). CLI: ${CLI_PATH}`;
 
@@ -66,13 +64,13 @@ const num = (v, name) => {
 export function resolveBundle(ref) {
   if (!ref) throw new Error('pass a recording id or bundle directory');
   const asPath = path.resolve(ref);
-  if (fs.existsSync(path.join(asPath, 'meta.json')) || fs.existsSync(path.join(asPath, 'record.json'))) return asPath;
+  if (fs.existsSync(path.join(asPath, 'meta.json'))) return asPath;
   const root = paths().recordings;
   if (fs.existsSync(root)) {
     for (const name of fs.readdirSync(root).sort().reverse()) {
       const dir = path.join(root, name);
       if (name === ref) return dir;
-      const rec = readJsonSync(path.join(dir, 'record.json'), null) || readJsonSync(path.join(dir, 'meta.json'), null);
+      const rec = readJsonSync(path.join(dir, 'meta.json'), null);
       if (rec && rec.id === ref) return dir;
     }
   }
@@ -108,9 +106,10 @@ async function cmdPull(args) {
   const say = (m) => process.stderr.write(`[screenbrief] ${m}\n`);
   // Already here and processed: answer at once.
   if (id !== 'latest' && !args.force) {
-    const done = path.join(bundleDirFor(id), 'FEEDBACK.md');
-    if (fs.existsSync(done)) {
+    const done = finishedFeedback(bundleDirFor(id));
+    if (done) {
       say(`already here; reusing ${bundleDirFor(id)} (--force fetches and processes again)`);
+      settle(id);
       console.log(done);
       return 0;
     }
@@ -119,8 +118,9 @@ async function cmdPull(args) {
   try {
     // 1. The phone, when it can be reached.
     let pulled = null;
-    let phoneProblem = args['no-phone'] ? 'the phone was not tried (--no-phone)' : '';
-    if (!args['no-phone']) {
+    const noPhone = args['no-phone'] || process.env.SCREENBRIEF_NO_PHONE === '1';
+    let phoneProblem = noPhone ? 'the phone was not tried (--no-phone)' : '';
+    if (!noPhone) {
       try {
         pulled = await pullRecording(id, { device: args.device, destDir: staging, log: say });
       } catch (e) {
@@ -128,57 +128,142 @@ async function cmdPull(args) {
         phoneProblem = e.message;
       }
     }
-    // 2. Otherwise the video the user attached to a T3 Code thread.
+    // 2. Otherwise the video the user attached to a T3 Code thread, whole or in parts.
+    let attachProblem = 'no attached video carries this recording\'s id or start time.';
+    let ask = `attach ${id === 'latest' ? 'the recording' : titleFor(id)} from Photos (album "ScreenBrief") to the thread`;
     if (!pulled && id !== 'latest') {
-      const attached = await findAttachedVideo(id, { tools });
-      if (attached) {
-        say(`using the attached video ${attached}`);
-        pulled = { id, moviePath: attached, meta: null, device: null };
+      const attached = await findAttached(id, { tools });
+      if (attached && attached.file) {
+        say(`using the attached video ${attached.file}`);
+        pulled = { id, moviePath: attached.file, meta: null, device: null };
+      } else if (attached && attached.parts) {
+        say(`joining the ${attached.total} attached parts`);
+        try {
+          const joined = await joinParts(tools, attached.parts, path.join(staging, `${titleFor(id)}.mov`));
+          pulled = { id, moviePath: joined, meta: null, device: null };
+        } catch (e) {
+          // Reported like any other way of not getting the video, so the request is remembered.
+          attachProblem = `the ${attached.total} attached parts could not be joined (${String(e.message).split('\n')[0]}).`;
+          ask = `attach the ${attached.total} parts of ${titleFor(id)} from Photos (album "ScreenBrief") to the thread again`;
+        }
+      } else if (attached && attached.missing) {
+        const have = attached.total - attached.missing.length;
+        const names = attached.missing.map((k) => `${titleFor(id)}-part${k}of${attached.total}`);
+        attachProblem = `this recording was attached in ${attached.total} parts and ${have} of them ${have === 1 ? 'is' : 'are'} here; missing: ${names.join(', ')}.`;
+        ask = `attach the missing part${names.length === 1 ? '' : 's'} (${names.join(', ')}) from Photos (album "ScreenBrief") to the thread`;
       }
     }
     if (!pulled) {
       console.error(
         `screenbrief pull: could not get the video for recording ${id}.\n` +
           `- iPhone: ${phoneProblem}\n` +
-          (id === 'latest' ? '' : `- T3 Code attachments: no attached video was recorded at that time.\n`) +
-          `Do not start on the changes and do not work from the transcript alone. Tell the user you need the video, ask them to attach ` +
-          `${id === 'latest' ? 'the recording' : `ScreenBrief-${id}`} from Photos (album "ScreenBrief") to the thread, and wait. When it is attached, run this command again.`,
+          (id === 'latest' ? '' : `- T3 Code attachments: ${attachProblem}\n`) +
+          `Do not start on the changes and do not work from the transcript alone. Tell the user you need the video, ask them to ${ask}, and wait. ` +
+          `When it is attached, run this command again.` +
+          laterNote(id),
       );
       return 2;
     }
     const outDir = bundleDirFor(pulled.id);
-    const done = path.join(outDir, 'FEEDBACK.md');
-    if (fs.existsSync(done) && !args.force) {
-      say(`already processed; reusing ${outDir}`);
-      console.log(done);
-      return 0;
-    }
-    const m = pulled.meta || {};
-    const when = idTime(pulled.id);
-    const meta = {
-      id: pulled.id,
-      startedAt: m.startedAt || (when ? when.toISOString() : undefined),
-      durationSec: m.durationSec,
-      device: m.device || (pulled.device ? { name: pulled.device.name, model: pulled.device.model, os: '' } : undefined),
-      source: pulled.device ? 'phone' : 'attachment',
-      hasMicAudio: m.hasMicAudio,
-    };
-    const started = Date.now();
-    const bundle = await processVideo(pulled.moviePath, { outDir, cfg, meta, id: pulled.id, onStatus: (s) => say(s.stage) });
-    say(
-      `${bundle.frames.length} frames, ${bundle.transcript.phrases.length} phrases, audio: ${bundle.transcript.audio.state}, ` +
-        `${((Date.now() - started) / 1000).toFixed(1)}s for a ${bundle.durationSec.toFixed(1)}s recording`,
+    // One process at a time works on a recording's bundle: the watcher and a pull run by hand
+    // would otherwise delete each other's frames and temporary files.
+    return await withLock(
+      path.join(paths().home, 'locks', `${pulled.id}.lock`),
+      () => processPulled(pulled, outDir, { args, cfg, say }),
+      { waitMs: 45 * 60_000, onWait: () => say(`another screenbrief is processing ${pulled.id}; waiting for it`) },
     );
-    console.log(bundle.feedbackPath);
-    return 0;
   } finally {
     await fsp.rm(staging, { recursive: true, force: true });
   }
 }
 
+async function processPulled(pulled, outDir, { args, cfg, say }) {
+  // Looked at under the lock: the process waited for may have just finished it.
+  const done = finishedFeedback(outDir);
+  if (done && !args.force) {
+    say(`already processed; reusing ${outDir}`);
+    settle(pulled.id);
+    console.log(done);
+    return 0;
+  }
+  const m = pulled.meta || {};
+  const when = idTime(pulled.id);
+  const meta = {
+    id: pulled.id,
+    startedAt: m.startedAt || (when ? when.toISOString() : undefined),
+    durationSec: m.durationSec,
+    device: m.device || (pulled.device ? { name: pulled.device.name, model: pulled.device.model, os: '' } : undefined),
+    source: pulled.device ? 'phone' : 'attachment',
+    hasMicAudio: m.hasMicAudio,
+  };
+  const started = Date.now();
+  const bundle = await processVideo(pulled.moviePath, { outDir, cfg, meta, id: pulled.id, onStatus: (s) => say(s.stage) });
+  say(
+    `${bundle.frames.length} frames, ${bundle.transcript.phrases.length} phrases, audio: ${bundle.transcript.audio.state}, ` +
+      `${((Date.now() - started) / 1000).toFixed(1)}s for a ${bundle.durationSec.toFixed(1)}s recording`,
+  );
+  // Only now: had processing failed, the request stays and the watcher tries again.
+  settle(pulled.id);
+  console.log(bundle.feedbackPath);
+  return 0;
+}
+
+/**
+ * Remembers a pull that failed, so `screenbrief watch` can finish it when the phone is back in
+ * reach, and returns the lines that tell the agent so. Nothing when the watcher itself is asking.
+ */
+function laterNote(id) {
+  if (id === 'latest' || process.env.SCREENBRIEF_WATCHER === '1') return '';
+  const threadId = process.env.T3CODE_THREAD_ID || null;
+  const waiter = rememberWaiter(id, { threadId, t3Bin: process.env.T3CODE_CLI_PATH || null });
+  if (!waiter) return '';
+  if (!watchInstalled()) {
+    return `\n(Fetching it automatically later is off on this Mac. The user can turn it on once with: screenbrief watch --install)`;
+  }
+  return (
+    `\nThis request is remembered. When the iPhone is next in reach of this Mac (unlocked, on the same Wi-Fi or plugged in), ` +
+    `the video is fetched and processed automatically` +
+    (threadId ? `, and this thread gets a message with the FEEDBACK.md path. Tell the user that, and that attaching the video is only needed to continue sooner.` : `. Run this command again later.`)
+  );
+}
+
+/**
+ * A pull by hand that produced FEEDBACK.md ends this thread's wait. The watcher's own pull leaves
+ * the request: the waiting thread is told first.
+ */
+function settle(id) {
+  if (process.env.SCREENBRIEF_WATCHER !== '1') settleWaiter(id, { threadId: process.env.T3CODE_THREAD_ID || null });
+}
+
+async function cmdWatch(args) {
+  if (args.install) {
+    const file = await installWatch();
+    console.log(`installed ${file}: checks every ${WATCH_INTERVAL_SEC / 60} minutes, and only reaches for the iPhone while a recording is waiting. Remove with: screenbrief watch --uninstall`);
+    return 0;
+  }
+  if (args.uninstall) {
+    const r = await uninstallWatch();
+    console.log(r.removed ? `removed ${r.file}` : `not installed (${r.file})`);
+    return 0;
+  }
+  const waiters = listWaiters();
+  if (args.status) {
+    console.log(watchInstalled() ? `background check: on (${watchPlistPath()})` : 'background check: off (turn on with: screenbrief watch --install)');
+    if (!waiters.length) console.log('waiting: nothing');
+    for (const w of waiters) console.log(`waiting: ${w.id}  asked ${w.requestedAt}${w.threadId ? `  thread ${w.threadId}` : ''}`);
+    return 0;
+  }
+  if (!waiters.length) return 0; // the usual case: nothing to do, and the phone is left alone
+  ensureDirs();
+  const stamp = () => new Date().toISOString();
+  const results = await withWatchLock(() => watchOnce({ log: (m) => console.log(`${stamp()} ${m}`) }));
+  if (results === null) console.log(`${stamp()} another pass is still running`);
+  return 0;
+}
+
 async function cmdFrames(args) {
   const dir = resolveBundle(args._[0]);
-  const cfg = loadConfig({ create: false });
+  const cfg = loadConfig();
   const tools = toolPaths(cfg);
   const src = path.join(dir, 'recording.mp4');
   if (!fs.existsSync(src)) throw new Error(`no recording.mp4 in ${dir}`);
@@ -202,107 +287,20 @@ async function cmdFrames(args) {
   return 0;
 }
 
-async function cmdThreads(args) {
-  const cfg = loadConfig();
-  const t3 = new T3({ t3Bin: toolPaths(cfg).t3, projectPaths: cfg.projectPaths || [] });
-  const r = await t3.threads(60);
-  if (args.json) {
-    console.log(JSON.stringify({ threads: r.threads, source: r.source, ...(r.warning ? { warning: r.warning } : {}) }, null, 2));
-    return 0;
-  }
-  if (r.warning) console.error(`warning: ${r.warning}`);
-  for (const t of r.threads) console.log(`${t.threadId}  ${String(t.updatedAt).slice(0, 16).replace('T', ' ')}  [${t.projectName}]  ${t.title}`);
-  return 0;
-}
-
-async function cmdSend(args) {
-  const dir = resolveBundle(args._[0]);
-  if (!args.thread && !args.project) throw new Error('pass --thread <id> or --project <path>');
-  const cfg = loadConfig();
-  const t3 = new T3({ t3Bin: toolPaths(cfg).t3, projectPaths: cfg.projectPaths || [] });
-  if (!loadBundle(dir)) throw new Error(`${dir} is not a finished bundle (still processing or failed?)`);
-  const target = args.thread ? { threadId: String(args.thread) } : { projectPath: path.resolve(String(args.project)) };
-  if (args.note) target.note = String(args.note);
-  const delivery = await deliverBundle(t3, dir, target);
-  // Keep the server's record in step when this bundle belongs to it.
-  const recFile = path.join(dir, 'record.json');
-  const rec = readJsonSync(recFile, null);
-  if (rec) {
-    const { messagePath, ...d } = delivery;
-    rec.delivery = d;
-    rec.deliveryRequest = null;
-    await writeJsonAtomic(recFile, rec);
-  }
-  if (delivery.state !== 'sent') throw new Error(`delivery failed: ${delivery.error}`);
-  console.log(`sent to thread ${delivery.threadId}${delivery.link ? ` (${delivery.link})` : ''}`);
-  console.log(delivery.messagePath);
-  return 0;
-}
-
-async function cmdPair(args = {}) {
-  const cfg = loadConfig();
-  ensureDirs();
-  const tools = toolPaths(cfg);
-  const info = pairingInfo(cfg);
-  console.log('Pair the ScreenBrief iPhone app by scanning this code with the Camera app:\n');
-  try {
-    console.log(await qrTerminal(tools, info.link));
-  } catch (e) {
-    console.error(`(could not draw a QR code: ${e.message})`);
-  }
-  try {
-    await qrPng(tools, info.link, paths().pairPng);
-    console.log(`QR image: ${paths().pairPng}`);
-  } catch (e) {
-    console.error(`(could not write ${paths().pairPng}: ${e.message})`);
-  }
-  console.log(`\nPairing link:\n${info.link}\n`);
-  try {
-    const hours = Math.min(72, Math.max(0.1, Number(args['valid-hours']) || 0.5));
-    const { code } = createPairCode(paths().pairCodes, Date.now(), hours * 3600 * 1000);
-    console.log(`Tap-to-pair page for the phone (valid ${hours < 1 ? `${Math.round(hours * 60)} minutes` : `${hours} hours`}, safe to paste in a chat):\n${info.alt}/pair/${code}\n`);
-  } catch (e) {
-    console.error(`(could not create a tap-to-pair code: ${e.message})`);
-  }
-  console.log(`Service: ${info.url}  (LAN: ${info.alt})`);
-  console.log(`Web uploader for Safari (no app needed): ${info.webUrl}`);
-  return 0;
-}
-
 export async function main(argv) {
   const [cmd, ...rest] = argv;
-  const args = parseArgs(rest, { boolean: ['json', 'dry-run', 'no-bonjour', 'help', 'force', 'no-phone'] });
+  const args = parseArgs(rest, { boolean: ['help', 'force', 'no-phone', 'install', 'uninstall', 'status'] });
   switch (cmd) {
-    case 'serve': {
-      const { serveForever } = await import('./server.mjs');
-      await serveForever({ port: args.port ? Number(args.port) : undefined, bonjour: !args['no-bonjour'] });
-      return new Promise(() => {}); // run until signalled
-    }
     case 'pull':
       return cmdPull(args);
     case 'process':
       return cmdProcess(args);
     case 'frames':
       return cmdFrames(args);
-    case 'threads':
-      return cmdThreads(args);
-    case 'send':
-      return cmdSend(args);
-    case 'pair':
-      return cmdPair(args);
+    case 'watch':
+      return cmdWatch(args);
     case 'doctor':
       return doctor();
-    case 'install-service': {
-      const r = await installService({ dryRun: !!args['dry-run'] });
-      if (r.dryRun) console.log(r.body);
-      else console.log(`installed ${r.file}; logs in ${paths().logs}`);
-      return 0;
-    }
-    case 'uninstall-service': {
-      const r = await uninstallService();
-      console.log(r.removed ? `removed ${r.file}` : `not installed (${r.file})`);
-      return 0;
-    }
     case undefined:
     case 'help':
     case '--help':

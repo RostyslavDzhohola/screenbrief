@@ -20,7 +20,9 @@ final class OversizeWarningUITests: DeviceTestCase {
         guard row.waitForExistence(timeout: 8) else {
             throw XCTSkip("No seeded recording \(Self.seededID) in the app's Documents/Recordings.")
         }
-        XCTAssertTrue(app.staticTexts["Too large to attach in T3 Code"].exists, "the list flags it")
+        // The seeded movie is small, so it cannot be split into parts: after a moment of
+        // "Splitting into parts to attach…" the app is back on this wording.
+        XCTAssertTrue(app.staticTexts["Too large to attach in T3 Code"].waitForExistence(timeout: 20), "the list flags it")
         shot("oversize-list")
         row.tap()
         let warning = app.staticTexts["too-large"]

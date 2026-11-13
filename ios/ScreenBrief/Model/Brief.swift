@@ -11,7 +11,10 @@ enum Brief {
         lines.append("")
         lines.append("Agent: get the video before doing anything else. On the Mac run:  screenbrief pull \(r.id)")
         let result = "prints the path of a FEEDBACK.md: what I said on a timeline next to screenshots of the screen at each moment. Read it, open the frames, then make the changes I describe."
-        if r.isTooLargeToAttach {
+        if let n = r.attachableParts {
+            lines.append("The video is \(Format.bytes(r.sizeBytes)), over T3 Code's \(AttachmentAdvice.limitText) attachment limit, so it is attached to this thread as \(n) parts (\(RecordingAlbum.partTitle(id: r.id, part: 1, of: n)) to part\(n)of\(n)). The command joins the parts (or copies the whole video from my iPhone when the phone is unlocked and on the same Wi-Fi as the Mac or plugged in) and \(result)")
+            lines.append("If it cannot get the video, do not start on the changes and do not work from the transcript alone. Tell me what the command said is missing, ask me to attach all \(n) parts from Photos (album \"\(RecordingAlbum.title)\") to this thread, and wait. When I have attached them, run the command again.")
+        } else if r.isTooLargeToAttach {
             lines.append("The video is \(Format.bytes(r.sizeBytes)), over T3 Code's \(AttachmentAdvice.limitText) attachment limit, so it is not attached to this thread: the command copies it from my iPhone, which must be unlocked and on the same Wi-Fi as the Mac or plugged in. It \(result)")
             lines.append("If it cannot get the video, do not start on the changes and do not work from the transcript alone. Tell me the Mac could not reach my iPhone, and wait until I say the phone is unlocked and near the Mac. Then run the command again.")
         } else {

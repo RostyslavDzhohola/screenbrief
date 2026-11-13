@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const { detectTouches } = await import(join(here, "..", "src", "touch-detect.mjs"));
 
-const FFMPEG = "/opt/homebrew/bin/ffmpeg";
+import { FFMPEG, FFPROBE } from "./tools.mjs";
 const KEEP = process.env.SCREENBRIEF_KEEP;
 const DIR = KEEP ? (mkdirSync(KEEP, { recursive: true }), KEEP) : mkdtempSync(join(tmpdir(), "screenbrief-touch-"));
 if (!KEEP) process.on("exit", () => { try { rmSync(DIR, { recursive: true, force: true }); } catch {} });
@@ -298,7 +298,7 @@ test("session re-encoded at 60% size with variable frame rate", async () => {
   // drop frames while nothing moves (like iOS does) and irregularly elsewhere, keep timestamps
   ffmpeg(["-i", session, "-vf", "select='not(between(t\\,0.2\\,0.8))*not(between(t\\,13.2\\,13.9))*not(eq(mod(n\\,3)\\,2)*between(t\\,6\\,9.6))*not(eq(mod(n\\,4)\\,1)*between(t\\,2.5\\,4.8))',scale=532:1152",
     "-fps_mode", "vfr", "-c:v", "libx264", "-preset", "veryfast", "-b:v", "3M", "-an", vfr]);
-  const pr = spawnSync("/opt/homebrew/bin/ffprobe", ["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames,r_frame_rate,avg_frame_rate,width,height", "-of", "csv=p=0", vfr]);
+  const pr = spawnSync(FFPROBE, ["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames,r_frame_rate,avg_frame_rate,width,height", "-of", "csv=p=0", vfr]);
   console.log(`[vfr] ffprobe width,height,r_frame_rate,avg_frame_rate,frames: ${String(pr.stdout).trim()}`);
   const { markers } = await detectTouches(vfr);
   check(markers, sessionTouches(), "session 532x1152 VFR");

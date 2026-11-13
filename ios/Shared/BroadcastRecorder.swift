@@ -26,6 +26,7 @@ final class BroadcastRecorder {
 
     typealias Saver = (_ movie: URL, _ fileName: String, _ creationDate: Date) throws -> RecordingAlbum.SaveResult
 
+    static let finishTimedOutMessage = "Finishing took too long. The recording will be saved to Photos the next time you start recording."
     static let cannotSaveMessage = "ScreenBrief can't save recordings to Photos. Open ScreenBrief, allow access to Photos (Settings > ScreenBrief > Photos > Full Access), then record again."
 
     let id: String
@@ -33,6 +34,7 @@ final class BroadcastRecorder {
     let fileName: String
     let fileURL: URL
     let directory: URL
+    private let recoveryDirectories: [URL]
     let writer: MovieWriter
     var diagnosticsSink: ((BroadcastDiagnostics) -> Void)?
     var diagnosticsInterval: TimeInterval = 3
@@ -46,23 +48,37 @@ final class BroadcastRecorder {
     private var heartbeat: DispatchSourceTimer?
 
     init(directory: URL = BroadcastRecorder.defaultDirectory,
+         alsoRecoverFrom: [URL]? = nil,
          startedAt: Date = Date(),
          writerConfiguration: MovieWriter.Configuration = .init(),
          access: @escaping () -> PhotosAccess = { .current },
          saver: @escaping Saver = RecordingAlbum.save) {
         self.directory = directory
+        // Earlier builds recorded into Caches; a movie one of them left behind is still saved.
+        recoveryDirectories = [directory] + (alsoRecoverFrom ?? (directory == Self.defaultDirectory ? [Self.legacyDirectory] : []))
         self.startedAt = startedAt
         id = RecordingID.make(for: startedAt)
         let ext = writerConfiguration.fileType == .mp4 ? "mp4" : "mov"
         fileName = "\(RecordingAlbum.filePrefix)\(id).\(ext)"
         fileURL = directory.appendingPathComponent(fileName)
-        writer = MovieWriter(outputURL: fileURL, configuration: writerConfiguration)
+        // The id travels inside the movie too: the Mac matches an attached video on this title.
+        var configuration = writerConfiguration
+        configuration.title = "\(RecordingAlbum.filePrefix)\(id)"
+        writer = MovieWriter(outputURL: fileURL, configuration: configuration)
         self.saver = saver
         self.access = access
         diagnostics = BroadcastDiagnostics(recordingId: id, startedAt: startedAt, updatedAt: startedAt, phase: "started")
     }
 
+    /// Application Support, not Caches: iOS may empty Caches when storage runs low, and a movie
+    /// waiting here to be saved to Photos is the only copy of that recording.
     static var defaultDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("Recordings", isDirectory: true)
+    }
+
+    /// Where builds up to November 2026 recorded.
+    static var legacyDirectory: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("Recordings", isDirectory: true)
     }
@@ -70,6 +86,11 @@ final class BroadcastRecorder {
     /// Nil when recording may go ahead, otherwise the message to end the broadcast with.
     func start() -> String? {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Movies here are on their way to Photos: they do not belong in a device backup.
+        var folder = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? folder.setResourceValues(values)
         let a = access()
         update(force: true) {
             $0.photosAddOnly = RecordingAlbum.statusName(a.addOnly)
@@ -103,6 +124,7 @@ final class BroadcastRecorder {
     }
 
     /// Finishes the movie and saves it to Photos. Synchronous and bounded (for `broadcastFinished`).
+    /// A movie whose finish timed out is left in place for the next broadcast to save.
     @discardableResult
     func finish(timeout: TimeInterval = 5) -> Outcome {
         lock.lock()
@@ -119,6 +141,13 @@ final class BroadcastRecorder {
             $0.apply(summary)
             $0.fileBytes = bytes
             $0.note("writer \(summary.finished ? "done" : "failed: \(summary.error ?? "?")"), \(bytes) bytes")
+        }
+        // The writer may still be changing the file: it is neither saved nor deleted now. It stays
+        // where it is, and `recoverLeftovers` of the next broadcast saves it.
+        if summary.finishTimedOut {
+            let error = Self.finishTimedOutMessage
+            update(force: true) { $0.phase = "failed"; $0.error = error; $0.note(error) }
+            return Outcome(summary: summary, saved: nil, error: error)
         }
         // An unfinished fragmented movie is still readable up to its last fragment: save it anyway.
         guard bytes > 0, summary.videoFramesAppended > 0 else {
@@ -144,17 +173,33 @@ final class BroadcastRecorder {
         }
     }
 
-    /// Movies an earlier broadcast left behind (the extension was killed before saving):
-    /// saves each to Photos and deletes it. Returns how many were saved.
+    /// Movies an earlier broadcast left behind (the extension was killed before saving, finishing
+    /// took too long, or saving failed): saves each to Photos and deletes it. One that cannot be
+    /// saved stays for the next broadcast to try again, however old it is: it is the only copy of
+    /// that recording. Returns how many were saved.
     @discardableResult
     func recoverLeftovers() -> Int {
-        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.creationDateKey])) ?? []
+        let files = recoveryDirectories.flatMap {
+            (try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: [.creationDateKey])) ?? []
+        }
         var saved = 0
         for url in files where url != fileURL && url.lastPathComponent.hasPrefix(RecordingAlbum.filePrefix) {
             let date = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
-            if Self.fileSize(url) > 0, (try? saver(url, url.lastPathComponent, date)) != nil { saved += 1 }
-            try? FileManager.default.removeItem(at: url)
-            update(force: true) { $0.note("leftover \(url.lastPathComponent): \(saved > 0 ? "saved" : "dropped")") }
+            let outcome: String
+            if Self.fileSize(url) == 0 {
+                try? FileManager.default.removeItem(at: url)
+                outcome = "dropped (empty)"
+            } else {
+                do {
+                    _ = try saver(url, url.lastPathComponent, date)
+                    try? FileManager.default.removeItem(at: url)
+                    saved += 1
+                    outcome = "saved"
+                } catch {
+                    outcome = "kept (save failed: \(error.localizedDescription))"
+                }
+            }
+            update(force: true) { $0.note("leftover \(url.lastPathComponent): \(outcome)") }
         }
         return saved
     }

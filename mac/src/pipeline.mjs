@@ -23,21 +23,24 @@ export function deviceString(meta) {
   return [name, d.os].filter(Boolean).join(', ') || null;
 }
 
-export async function writeStatus(dir, status) {
-  await writeJsonAtomic(path.join(dir, 'status.json'), { ...status, updatedAt: new Date().toISOString() });
+/** The bundle's FEEDBACK.md, if `dir` holds a bundle whose processing finished; otherwise null. */
+export function finishedFeedback(dir) {
+  const file = path.join(dir, 'FEEDBACK.md');
+  const status = readJsonSync(path.join(dir, 'status.json'), null);
+  return fs.existsSync(file) && status && status.state === 'ready' ? file : null;
 }
 
-export function readStatus(dir) {
-  return readJsonSync(path.join(dir, 'status.json'), null);
+export async function writeStatus(dir, status) {
+  await writeJsonAtomic(path.join(dir, 'status.json'), { ...status, updatedAt: new Date().toISOString() });
 }
 
 /**
  * Process one video into a bundle.
  * opts: { outDir, id, note, meta (phone meta), cfg, onStatus(status) }
- * Returns the bundle summary (also what loadBundle() reads back).
+ * Returns the bundle summary.
  */
 export async function processVideo(input, opts = {}) {
-  const cfg = opts.cfg || loadConfig({ create: false });
+  const cfg = opts.cfg || loadConfig();
   const tools = opts.tools || toolPaths(cfg);
   const meta = opts.meta || {};
   const id = opts.id || meta.id || randomId();
@@ -61,6 +64,9 @@ export async function processVideo(input, opts = {}) {
   let rotatedInput = null;
   try {
     if (!fs.existsSync(input)) throw new Error(`input not found: ${input}`);
+    // Processing again into the same folder: the old result must not pass for the new one if
+    // this attempt fails part-way.
+    await fsp.rm(path.join(dir, 'FEEDBACK.md'), { force: true });
     // 1. transcoding
     await status('transcoding');
     // Leftovers from an interrupted earlier attempt.
@@ -229,31 +235,4 @@ export async function processVideo(input, opts = {}) {
   } finally {
     if (rotatedInput) await fsp.rm(rotatedInput, { force: true }).catch(() => {});
   }
-}
-
-/** Read a finished bundle back from disk (for `send` and the server). */
-export function loadBundle(dir) {
-  const meta = readJsonSync(path.join(dir, 'meta.json'), null);
-  const transcript = readJsonSync(path.join(dir, 'transcript.json'), null);
-  const timeline = readJsonSync(path.join(dir, 'timeline.json'), null);
-  if (!meta || !transcript) return null;
-  return {
-    id: meta.id,
-    dir,
-    feedbackPath: path.join(dir, 'FEEDBACK.md'),
-    recordingPath: path.join(dir, 'recording.mp4'),
-    contactSheet: meta.paths && meta.paths.contactSheet,
-    durationSec: meta.durationSec,
-    width: meta.width,
-    height: meta.height,
-    recordedAt: meta.recordedAt,
-    createdAt: meta.createdAt,
-    device: meta.device,
-    note: meta.note,
-    transcript,
-    frames: (timeline && timeline.frames) || [],
-    markers: (timeline && timeline.markers) || [],
-    frameCount: meta.frameCount,
-    timings: meta.timings,
-  };
 }

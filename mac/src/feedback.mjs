@@ -1,6 +1,6 @@
 // Builds timeline.json, FEEDBACK.md and the chat delivery message from the pipeline's results.
 import path from 'node:path';
-import { fmtTime, fmtDuration, humanLocal, chatPath } from './util.mjs';
+import { fmtTime, fmtDuration, humanLocal } from './util.mjs';
 import { frameIndexAt } from './select-frames.mjs';
 import { describeMarker } from './markers.mjs';
 
@@ -118,6 +118,16 @@ export function renderFeedback(b) {
   );
   L.push(`To look closer at any moment, extract more frames: \`screenbrief frames "${b.dir}" --at <seconds>\` or \`--from <s> --to <s> --fps 2\` (CLI at \`${b.cliPath}\`).`);
   L.push('');
+  // From real use: people ask "did you get the video?" and "where is it?" when the agent does not say.
+  L.push(
+    `Before you start on the changes, tell the user in one or two lines that you have the video (${fmtDuration(b.durationSec)}, ${b.frames.length} screenshots) ` +
+      `and where it is on this Mac: \`${b.recordingPath}\`.`,
+  );
+  L.push(
+    'The first and last few seconds usually show the recorder itself (the ScreenBrief app and the iOS "Screen Sharing" sheet) and the app switcher, not the app being tested: ignore those screens. ' +
+      'The first words may be missing if the user started talking during the countdown before recording began.',
+  );
+  L.push('');
   if (b.interrupted) {
     L.push('This recording was interrupted: the phone stopped sending before the recording ended, so the last moments are missing.');
     L.push('');
@@ -176,37 +186,4 @@ export function renderFeedback(b) {
   }
   L.push('');
   return L.join('\n');
-}
-
-/** Plain-text chat message for the T3 thread. */
-export function renderDeliveryMessage(b, { note, maxChars = 6000 } = {}) {
-  const when = b.recordedAt ? humanLocal(new Date(b.recordedAt)) : humanLocal(new Date(b.createdAt || Date.now()));
-  const head = [];
-  head.push(`Phone feedback recording: ${fmtDuration(b.durationSec)}, recorded ${when}${b.device ? ` on ${b.device}` : ''}.`);
-  head.push('');
-  head.push(`Read ${chatPath(b.feedbackPath)} first: it ties what I said to screenshots of my screen at each moment. Open the frame images it lists, then make the changes I describe.`);
-  const notes = [b.note, note].filter((x) => x && String(x).trim());
-  if (notes.length) {
-    head.push('');
-    head.push(`My note: ${[...new Set(notes.map((x) => String(x).trim()))].join(' / ')}`);
-  }
-  const audio = audioSentence(b.transcript.audio);
-  head.push('');
-  if (audio) {
-    head.push(audio);
-    if (b.markers.length) head.push(`${b.markers.length} touch marker(s) are listed in the timeline.`);
-    return head.join('\n');
-  }
-  head.push('Transcript:');
-  let text = head.join('\n');
-  const tail = '\n(Transcript truncated here; the full text is in FEEDBACK.md.)';
-  for (const p of b.transcript.phrases) {
-    const line = `\n[${fmtTime(p.start, 0)}] ${p.text}`;
-    if (text.length + line.length + tail.length > maxChars) {
-      text += tail;
-      return text;
-    }
-    text += line;
-  }
-  return text;
 }

@@ -48,10 +48,11 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { idTime, findAttachedVideo } from '../src/pull.mjs';
+import { idTime, findAttachedVideo, titleFor } from '../src/pull.mjs';
+import { finishedFeedback } from '../src/pipeline.mjs';
 
-const FFMPEG = '/opt/homebrew/bin/ffmpeg';
-const TOOLS = { ffprobe: '/opt/homebrew/bin/ffprobe', ffmpeg: FFMPEG };
+import { FFMPEG, FFPROBE } from './tools.mjs';
+const TOOLS = { ffprobe: FFPROBE, ffmpeg: FFMPEG };
 
 test('pull: an id is the local start time; other id shapes have none', () => {
   const t = idTime('20261111-225720');
@@ -78,5 +79,61 @@ test('pull: the attached video is found by its recorded start time, others are i
   assert.equal(await findAttachedVideo('20261111-000000', { attachmentsDir: dir, tools: TOOLS }), null);
   assert.equal(await findAttachedVideo('latest', { attachmentsDir: dir, tools: TOOLS }), null);
   assert.equal(await findAttachedVideo(id, { attachmentsDir: path.join(dir, 'missing'), tools: TOOLS }), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/** A one-second movie in `dir`, optionally stamped with a creation time and a title. */
+function makeMovie(dir, name, { when, title } = {}) {
+  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=64x128:d=1', '-pix_fmt', 'yuv420p'];
+  if (when) args.push('-metadata', `creation_time=${when.toISOString()}`);
+  if (title) args.push('-metadata', `title=${title}`);
+  execFileSync(FFMPEG, [...args, path.join(dir, name)]);
+  return path.join(dir, name);
+}
+
+test('pull: a movie titled with the recording id is matched exactly, whatever its time says', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sb-att-'));
+  const id = '20261111-225720';
+  const start = idTime(id);
+  // Recorded while travelling: the creation time is hours away from the id read in this time zone.
+  const titled = makeMovie(dir, 'thread-aaa-mov.mov', { when: new Date(start.getTime() + 7 * 3600_000), title: titleFor(id) });
+  // Another recording that happens to sit at the id's time, with its own title.
+  makeMovie(dir, 'thread-bbb-mov.mov', { when: start, title: titleFor('20261111-155720') });
+  assert.equal(await findAttachedVideo(id, { attachmentsDir: dir, tools: TOOLS }), titled);
+  // An id with a suffix has no time to match on, only the title.
+  const suffixed = makeMovie(dir, 'thread-ccc-mov.mov', { title: titleFor('20261111-225720-2') });
+  assert.equal(await findAttachedVideo('20261111-225720-2', { attachmentsDir: dir, tools: TOOLS }), suffixed);
+  assert.equal(await findAttachedVideo('../../etc', { attachmentsDir: dir, tools: TOOLS }), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('pull: of several movies near the id time the closest wins; of copies, the newest', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sb-att-'));
+  const id = '20261111-225720';
+  const start = idTime(id);
+  const near = makeMovie(dir, 'thread-near-mov.mov', { when: new Date(start.getTime() + 1000) });
+  const far = makeMovie(dir, 'thread-far-mov.mov', { when: new Date(start.getTime() - 2500) });
+  // `far` was attached last: recency must not beat closeness.
+  fs.utimesSync(near, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+  fs.utimesSync(far, new Date(), new Date());
+  assert.equal(await findAttachedVideo(id, { attachmentsDir: dir, tools: TOOLS }), near);
+  const copy = path.join(dir, 'thread-copy-mov.mov');
+  fs.copyFileSync(near, copy);
+  fs.utimesSync(copy, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+  assert.equal(await findAttachedVideo(id, { attachmentsDir: dir, tools: TOOLS }), copy);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('pull: only a bundle whose processing finished is reused', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sb-bundle-'));
+  assert.equal(finishedFeedback(dir), null);
+  fs.writeFileSync(path.join(dir, 'FEEDBACK.md'), '# old');
+  assert.equal(finishedFeedback(dir), null); // no status
+  fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ state: 'failed' }));
+  assert.equal(finishedFeedback(dir), null);
+  fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ state: 'processing' }));
+  assert.equal(finishedFeedback(dir), null);
+  fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ state: 'ready' }));
+  assert.equal(finishedFeedback(dir), path.join(dir, 'FEEDBACK.md'));
   fs.rmSync(dir, { recursive: true, force: true });
 });
