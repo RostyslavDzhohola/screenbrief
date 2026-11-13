@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeRecording, makeTapClip, SCENARIO } from './synth.mjs';
 import { run } from '../src/util.mjs';
+import { FFMPEG } from './tools.mjs';
 
 export const MAC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const CLI = path.join(MAC_DIR, 'bin', 'screenbrief');
@@ -71,7 +72,7 @@ export async function cli(args, env, opts = {}) {
 
 /** Mean RGB of a small patch of a JPEG (x, y as fractions of the image). */
 export async function patchColor(jpeg, fx, fy) {
-  const { stdout } = await run('/opt/homebrew/bin/ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', jpeg, '-vf', `crop=8:8:(iw-8)*${fx}:(ih-8)*${fy},scale=1:1:flags=area,format=rgb24`, '-f', 'rawvideo', '-'], { encoding: 'buffer', timeoutMs: 30_000 });
+  const { stdout } = await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-i', jpeg, '-vf', `crop=8:8:(iw-8)*${fx}:(ih-8)*${fy},scale=1:1:flags=area,format=rgb24`, '-f', 'rawvideo', '-'], { encoding: 'buffer', timeoutMs: 30_000 });
   return [stdout[0], stdout[1], stdout[2]];
 }
 

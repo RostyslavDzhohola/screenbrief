@@ -22,7 +22,9 @@ export class PullError extends Error {}
 async function devicectl(args, { timeoutMs = 120_000 } = {}) {
   const tmp = path.join(os.tmpdir(), `screenbrief-devicectl-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   try {
-    const r = await run(DEVICECTL[0], [DEVICECTL[1], ...args, '--json-output', tmp], { timeoutMs, allowFail: true });
+    // SCREENBRIEF_DEVICECTL names a script that stands in for devicectl (the tests have no phone).
+    const cmd = process.env.SCREENBRIEF_DEVICECTL ? [process.execPath, process.env.SCREENBRIEF_DEVICECTL] : DEVICECTL;
+    const r = await run(cmd[0], [cmd[1], ...args, '--json-output', tmp], { timeoutMs, allowFail: true });
     let json = null;
     try {
       json = JSON.parse(await fsp.readFile(tmp, 'utf8'));
@@ -129,19 +131,26 @@ export async function pullRecording(id, { device: wanted, destDir, log = () => {
       lastProblem = `${device.name}: copying ${movie} failed: ${firstLine(copy.stderr || copy.stdout)}`;
       continue;
     }
+    // The sidecar holds the movie's size. Without it the copy cannot be checked, so it is not used.
     let meta = null;
     const metaPath = path.join(destDir, `${realId}.json`);
-    const m = await devicectl(['device', 'copy', 'from', ...domain, '--source', `${PHONE_DIR}/${realId}.json`, '--destination', metaPath]);
-    if (m.code === 0) {
+    for (let attempt = 0; !meta && attempt < 2; attempt++) {
+      const m = await devicectl(['device', 'copy', 'from', ...domain, '--source', `${PHONE_DIR}/${realId}.json`, '--destination', metaPath]);
+      if (m.code !== 0) continue;
       try {
-        meta = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
+        const parsed = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
+        if (parsed && typeof parsed === 'object') meta = parsed;
       } catch {
-        meta = null;
+        /* the app may be rewriting it; tried once more */
       }
+    }
+    if (!meta) {
+      lastProblem = `${device.name}: could not read the details of recording ${realId} from ScreenBrief, so the copy of ${movie} cannot be checked. Keep the iPhone unlocked and near the Mac, then run this again.`;
+      continue;
     }
     // The app records the movie's size; a copy that came out shorter was cut off on the way.
     const got = fs.statSync(moviePath).size;
-    if (meta && Number(meta.sizeBytes) > 0 && got !== Number(meta.sizeBytes)) {
+    if (Number(meta.sizeBytes) > 0 && got !== Number(meta.sizeBytes)) {
       lastProblem = `${device.name}: the copy of ${movie} is incomplete (${got} of ${meta.sizeBytes} bytes). Keep the iPhone unlocked and near the Mac, then run this again.`;
       continue;
     }

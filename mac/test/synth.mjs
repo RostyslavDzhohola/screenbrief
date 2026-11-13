@@ -4,7 +4,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { run } from '../src/util.mjs';
 
-const FFMPEG = '/opt/homebrew/bin/ffmpeg';
+import { FFMPEG } from './tools.mjs';
 export const W = 886;
 export const H = 1920;
 

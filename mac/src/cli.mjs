@@ -7,7 +7,7 @@ import { loadConfig, ensureDirs, tools as toolPaths, paths, CLI_PATH } from './c
 import { processVideo, finishedFeedback } from './pipeline.mjs';
 import { probe, extractFrame } from './media.mjs';
 import { doctor } from './doctor.mjs';
-import { rememberWaiter, forgetWaiter, listWaiters, watchOnce, withWatchLock, watchInstalled, installWatch, uninstallWatch, watchPlistPath, WATCH_INTERVAL_SEC } from './watch.mjs';
+import { rememberWaiter, settleWaiter, listWaiters, watchOnce, withWatchLock, watchInstalled, installWatch, uninstallWatch, watchPlistPath, WATCH_INTERVAL_SEC } from './watch.mjs';
 import { fmtTimeForName, readJsonSync, mapLimit } from './util.mjs';
 
 const HELP = `screenbrief: phone screen recordings with spoken feedback -> a timeline an agent can read
@@ -108,7 +108,7 @@ async function cmdPull(args) {
     const done = finishedFeedback(bundleDirFor(id));
     if (done) {
       say(`already here; reusing ${bundleDirFor(id)} (--force fetches and processes again)`);
-      settleWaiter(id);
+      settle(id);
       console.log(done);
       return 0;
     }
@@ -157,11 +157,11 @@ async function cmdPull(args) {
       );
       return 2;
     }
-    settleWaiter(pulled.id);
     const outDir = bundleDirFor(pulled.id);
     const done = finishedFeedback(outDir);
     if (done && !args.force) {
       say(`already processed; reusing ${outDir}`);
+      settle(pulled.id);
       console.log(done);
       return 0;
     }
@@ -181,6 +181,8 @@ async function cmdPull(args) {
       `${bundle.frames.length} frames, ${bundle.transcript.phrases.length} phrases, audio: ${bundle.transcript.audio.state}, ` +
         `${((Date.now() - started) / 1000).toFixed(1)}s for a ${bundle.durationSec.toFixed(1)}s recording`,
     );
+    // Only now: had processing failed, the request stays and the watcher tries again.
+    settle(pulled.id);
     console.log(bundle.feedbackPath);
     return 0;
   } finally {
@@ -207,9 +209,12 @@ function laterNote(id) {
   );
 }
 
-/** A pull by hand that got the video ends the wait. The watcher's own pull leaves it: the thread is told first. */
-function settleWaiter(id) {
-  if (process.env.SCREENBRIEF_WATCHER !== '1') forgetWaiter(id);
+/**
+ * A pull by hand that produced FEEDBACK.md ends this thread's wait. The watcher's own pull leaves
+ * the request: the waiting thread is told first.
+ */
+function settle(id) {
+  if (process.env.SCREENBRIEF_WATCHER !== '1') settleWaiter(id, { threadId: process.env.T3CODE_THREAD_ID || null });
 }
 
 async function cmdWatch(args) {

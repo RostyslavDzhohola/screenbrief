@@ -4,6 +4,7 @@
 // the thread that asked gets a message with the FEEDBACK.md path.
 //
 // With nothing remembered a pass does nothing at all: it never touches the phone.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,24 +19,50 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 export const waitingDir = () => path.join(paths().home, 'waiting');
 const waiterFile = (id) => path.join(waitingDir(), `${id}.json`);
 
-/** Remember that `threadId` (may be null) is waiting for recording `id`. */
+const readWaiter = (id) => readJsonSync(waiterFile(id), null);
+
+/**
+ * Remember that `threadId` (may be null) is waiting for recording `id`. Every write is a new
+ * revision with its own token, so a pass that started before it cannot delete it by mistake.
+ */
 export function rememberWaiter(id, { threadId = null, t3Bin = null, now = Date.now() } = {}) {
   if (!ID_RE.test(String(id))) return null;
   fs.mkdirSync(waitingDir(), { recursive: true });
-  const old = readJsonSync(waiterFile(id), null);
+  const old = readWaiter(id);
   const waiter = {
     id,
     // A later request from another thread replaces the earlier one: the newest asker is told.
     threadId: threadId || (old && old.threadId) || null,
     t3Bin: t3Bin || (old && old.t3Bin) || null,
     requestedAt: (old && old.requestedAt) || new Date(now).toISOString(),
+    token: crypto.randomUUID(),
   };
-  fs.writeFileSync(waiterFile(id), JSON.stringify(waiter, null, 2) + '\n');
+  // Written beside the file and renamed over it: a reader never sees half a request.
+  const tmp = `${waiterFile(id)}.${waiter.token}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(waiter, null, 2) + '\n');
+  fs.renameSync(tmp, waiterFile(id));
   return waiter;
 }
 
-export function forgetWaiter(id) {
+/** Forgets the request for `id`. With `token`, only if that revision is still the current one. */
+export function forgetWaiter(id, token) {
+  if (token !== undefined) {
+    const now = readWaiter(id);
+    if (!now || (now.token || null) !== (token || null)) return false;
+  }
   fs.rmSync(waiterFile(id), { force: true });
+  return true;
+}
+
+/**
+ * A pull run by hand got the video. The wait ends if it was this thread's (or nobody's); another
+ * thread's request stays, and the watcher tells that thread on its next pass.
+ */
+export function settleWaiter(id, { threadId = null } = {}) {
+  const now = readWaiter(id);
+  if (!now) return false;
+  if (now.threadId && now.threadId !== threadId) return false;
+  return forgetWaiter(id, now.token);
 }
 
 /** Requests still waiting, oldest first. Ones older than two weeks are dropped. */
@@ -90,8 +117,8 @@ async function notifyThread(waiter, feedbackPath) {
 /**
  * One pass over the waiting requests. Returns [{ id, state, detail? }] with state one of
  * 'waiting' (still not available), 'delivered' (processed and the thread told),
- * 'ready' (processed; nobody to tell), 'notify-failed' (processed; telling the thread failed and
- * is tried again on the next pass).
+ * 'ready' (processed; nobody to tell), 'settled' (someone got it by hand meanwhile),
+ * 'notify-failed' (processed; telling the thread failed and is tried again on the next pass).
  */
 export async function watchOnce({ pull = pullChild, notify = notifyThread, log = () => {}, now = Date.now() } = {}) {
   const results = [];
@@ -101,43 +128,88 @@ export async function watchOnce({ pull = pullChild, notify = notifyThread, log =
       results.push({ id: w.id, state: 'waiting', detail: got.detail });
       continue;
     }
-    if (!w.threadId) {
-      forgetWaiter(w.id);
+    // The pull took a while: the request is read again, so the thread told is the one waiting
+    // now, and only the revision that was delivered is deleted.
+    const current = readWaiter(w.id);
+    if (!current) {
+      log(`${w.id}: processed; the request was settled meanwhile`);
+      results.push({ id: w.id, state: 'settled', feedbackPath: got.feedbackPath });
+      continue;
+    }
+    if (!current.threadId) {
+      forgetWaiter(current.id, current.token);
       log(`${w.id}: processed (${got.feedbackPath}); no thread to tell`);
       results.push({ id: w.id, state: 'ready', feedbackPath: got.feedbackPath });
       continue;
     }
     try {
-      await notify(w, got.feedbackPath);
-      forgetWaiter(w.id);
-      log(`${w.id}: processed and thread ${w.threadId} told`);
+      await notify(current, got.feedbackPath);
+      forgetWaiter(current.id, current.token);
+      log(`${w.id}: processed and thread ${current.threadId} told`);
       results.push({ id: w.id, state: 'delivered', feedbackPath: got.feedbackPath });
     } catch (e) {
-      log(`${w.id}: processed, but telling thread ${w.threadId} failed: ${e.message}`);
+      log(`${w.id}: processed, but telling thread ${current.threadId} failed: ${e.message}`);
       results.push({ id: w.id, state: 'notify-failed', feedbackPath: got.feedbackPath, detail: e.message });
     }
   }
   return results;
 }
 
-/** Runs `fn` unless another pass is running (a lock file with a live pid, at most 40 minutes old). */
+const LOCK_MAX_AGE_MS = 6 * 3600_000;
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
+/**
+ * Runs `fn` unless another pass is running; returns null then. The lock file is created
+ * exclusively, so two passes starting together cannot both get it, and it is removed only by the
+ * pass that owns it. A lock whose process is gone (or that is over six hours old) is taken over.
+ */
 export async function withWatchLock(fn) {
   fs.mkdirSync(waitingDir(), { recursive: true });
   const lock = path.join(waitingDir(), '.lock');
-  const held = readJsonSync(lock, null);
-  if (held && Date.now() - held.at < 40 * 60_000) {
+  const mine = { pid: process.pid, at: Date.now(), token: crypto.randomUUID() };
+  const take = () => {
     try {
-      process.kill(held.pid, 0);
-      return null; // still running
-    } catch {
-      /* stale */
+      fs.writeFileSync(lock, JSON.stringify(mine), { flag: 'wx' });
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      return false;
     }
+  };
+  if (!take()) {
+    const held = readJsonSync(lock, null);
+    let age = Infinity;
+    try {
+      age = Date.now() - fs.statSync(lock).mtimeMs;
+    } catch {
+      /* gone again */
+    }
+    // A lock just created may not have its contents yet: it counts as held.
+    const live = held ? pidAlive(held.pid) && age < LOCK_MAX_AGE_MS : age < 10_000;
+    if (live) return null;
+    // Stale. Moving it aside succeeds for one process only; the others see ENOENT and step back.
+    const aside = `${lock}.${mine.token}.stale`;
+    try {
+      fs.renameSync(lock, aside);
+    } catch {
+      return null;
+    }
+    fs.rmSync(aside, { force: true });
+    if (!take()) return null;
   }
-  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() }));
   try {
     return await fn();
   } finally {
-    fs.rmSync(lock, { force: true });
+    const now = readJsonSync(lock, null);
+    if (now && now.token === mine.token) fs.rmSync(lock, { force: true });
   }
 }
 
@@ -201,8 +273,14 @@ export async function installWatch() {
   fs.mkdirSync(paths().home, { recursive: true });
   await run('/bin/launchctl', ['bootout', `${domain()}/${WATCH_LABEL}`], { allowFail: true, timeoutMs: 20_000 });
   fs.writeFileSync(file, watchPlistXml());
-  await run('/usr/bin/plutil', ['-lint', file], { timeoutMs: 10_000 });
-  await run('/bin/launchctl', ['bootstrap', domain(), file], { timeoutMs: 20_000 });
+  try {
+    await run('/usr/bin/plutil', ['-lint', file], { timeoutMs: 10_000 });
+    await run('/bin/launchctl', ['bootstrap', domain(), file], { timeoutMs: 20_000 });
+  } catch (e) {
+    // No job was loaded: a plist left behind would make pulls promise a fetch that never comes.
+    fs.rmSync(file, { force: true });
+    throw e;
+  }
   return file;
 }
 

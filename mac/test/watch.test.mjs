@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { tempHome, testEnv, cli, MAC_DIR } from './helpers.mjs';
 import { titleFor } from '../src/pull.mjs';
 
-const FFMPEG = '/opt/homebrew/bin/ffmpeg';
+import { FFMPEG } from './tools.mjs';
 const STUB = path.join(MAC_DIR, 'test', 'fixtures', 't3-stub.mjs');
 const ID = '20261112-175115';
 
@@ -119,6 +119,127 @@ test('watch: a pull that succeeds by hand clears the request, and old requests e
   const status = await cli(['watch', '--status'], env);
   assert.match(status.stdout, /waiting: nothing/);
   assert.equal(fs.existsSync(path.join(home, 'waiting', `${old}.json`)), false);
+});
+
+test('watch: a pull by hand from another thread leaves the waiting thread to be told', async () => {
+  const { home, attachments, env } = await setup();
+  await cli(['pull', ID], env, { allowFail: true });
+  attach(attachments, ID);
+  await cli(['pull', ID], { ...env, T3CODE_THREAD_ID: 'thread-other' });
+  assert.equal(waiter(home).threadId, 'thread-123');
+  const pass = await cli(['watch'], env);
+  assert.match(pass.stdout, /processed and thread thread-123 told/);
+  assert.deepEqual(stubCalls(home).map((c) => c.argv[2]), ['thread-123']);
+});
+
+test('watch: a pull by hand that fails while processing keeps the request', async () => {
+  const { home, attachments, env } = await setup();
+  await cli(['pull', ID], env, { allowFail: true });
+  attach(attachments, ID);
+  // The bundle cannot be written: a file sits where its folder goes.
+  fs.writeFileSync(path.join(home, 'recordings', `phone-${ID}`), 'in the way');
+  const r = await cli(['pull', ID], env, { allowFail: true });
+  assert.notEqual(r.code, 0);
+  assert.ok(waiter(home));
+});
+
+// ---- races, with the watcher's functions called directly -----------------------------------------
+import { rememberWaiter, settleWaiter, watchOnce, withWatchLock, waitingDir } from '../src/watch.mjs';
+import { spawn } from 'node:child_process';
+
+async function inHome(fn) {
+  const before = process.env.SCREENBRIEF_HOME;
+  process.env.SCREENBRIEF_HOME = await tempHome('sb-watch-race-');
+  try {
+    return await fn(process.env.SCREENBRIEF_HOME);
+  } finally {
+    if (before === undefined) delete process.env.SCREENBRIEF_HOME;
+    else process.env.SCREENBRIEF_HOME = before;
+  }
+}
+
+test('watch: a thread that asks while the pull runs is the one told, and nothing of it is lost', async () => {
+  await inHome(async (home) => {
+    rememberWaiter(ID, { threadId: 'thread-a' });
+    const told = [];
+    const res = await watchOnce({
+      pull: async () => {
+        rememberWaiter(ID, { threadId: 'thread-b' });
+        return { ok: true, feedbackPath: '/x/FEEDBACK.md' };
+      },
+      notify: async (w) => told.push(w.threadId),
+    });
+    assert.deepEqual(told, ['thread-b']);
+    assert.equal(res[0].state, 'delivered');
+    assert.equal(fs.existsSync(path.join(home, 'waiting', `${ID}.json`)), false);
+  });
+});
+
+test('watch: a thread that asks while the message is being sent keeps its request', async () => {
+  await inHome(async (home) => {
+    rememberWaiter(ID, { threadId: 'thread-a' });
+    const told = [];
+    await watchOnce({
+      pull: async () => ({ ok: true, feedbackPath: '/x/FEEDBACK.md' }),
+      notify: async (w) => {
+        told.push(w.threadId);
+        rememberWaiter(ID, { threadId: 'thread-b' });
+      },
+    });
+    assert.deepEqual(told, ['thread-a']);
+    assert.equal(waiter(home).threadId, 'thread-b');
+    // The next pass tells the newer thread.
+    await watchOnce({ pull: async () => ({ ok: true, feedbackPath: '/x/FEEDBACK.md' }), notify: async (w) => told.push(w.threadId) });
+    assert.deepEqual(told, ['thread-a', 'thread-b']);
+    assert.equal(fs.existsSync(path.join(home, 'waiting', `${ID}.json`)), false);
+  });
+});
+
+test('watch: a request settled by hand while the pull runs is not announced', async () => {
+  await inHome(async () => {
+    rememberWaiter(ID, { threadId: 'thread-a' });
+    const told = [];
+    const res = await watchOnce({
+      pull: async () => {
+        assert.equal(settleWaiter(ID, { threadId: 'thread-other' }), false);
+        assert.equal(settleWaiter(ID, { threadId: 'thread-a' }), true);
+        return { ok: true, feedbackPath: '/x/FEEDBACK.md' };
+      },
+      notify: async (w) => told.push(w.threadId),
+    });
+    assert.deepEqual(told, []);
+    assert.equal(res[0].state, 'settled');
+  });
+});
+
+test('watch: one pass at a time; a dead pass is taken over; only the owner releases the lock', async () => {
+  await inHome(async () => {
+    const lock = path.join(waitingDir(), '.lock');
+    const outer = await withWatchLock(async () => {
+      assert.equal(await withWatchLock(async () => 'second'), null);
+      return 'first';
+    });
+    assert.equal(outer, 'first');
+    assert.equal(fs.existsSync(lock), false);
+    // Left by a process that no longer exists.
+    fs.writeFileSync(lock, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now(), token: 'gone' }));
+    assert.equal(await withWatchLock(async () => 'took over'), 'took over');
+    // Another pass owns the lock by the time this one ends: it is left alone.
+    await withWatchLock(async () => fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now(), token: 'someone else' })));
+    assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).token, 'someone else');
+  });
+});
+
+test('watch: of several passes started together, exactly one runs', async () => {
+  await inHome(async (home) => {
+    const log = path.join(home, 'lock.log');
+    fs.writeFileSync(log, '');
+    const holder = path.join(MAC_DIR, 'test', 'fixtures', 'lock-holder.mjs');
+    const kids = Array.from({ length: 6 }, () => spawn(process.execPath, [holder], { env: { ...process.env, LOCK_LOG: log }, stdio: 'ignore' }));
+    await Promise.all(kids.map((k) => new Promise((r) => k.on('exit', r))));
+    assert.equal(fs.readFileSync(log, 'utf8').trim().split('\n').length, 1, fs.readFileSync(log, 'utf8'));
+    assert.equal(fs.existsSync(path.join(home, 'waiting', '.lock')), false);
+  });
 });
 
 test('watch: the launchd job runs `screenbrief watch` every two minutes and is valid', async () => {
