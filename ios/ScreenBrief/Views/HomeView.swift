@@ -9,7 +9,7 @@ struct HomeView: View {
                 Section {
                     VStack(alignment: .leading, spacing: 10) {
                         RecordControl()
-                        Text("Tap Start Sharing, then switch to the app you are testing and talk. Turn Microphone on in the sheet; it stays on for next time. Recordings up to about \(AttachmentAdvice.minutesThatFit()) minutes fit T3 Code's \(AttachmentAdvice.limitText) attachment limit.")
+                        Text("Tap Start Sharing, then switch to the app you are testing and talk. Turn Microphone on in the sheet; it stays on for next time. Recordings up to about \(AttachmentAdvice.minutesThatFit()) minutes attach as one file; longer ones are split into parts.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }

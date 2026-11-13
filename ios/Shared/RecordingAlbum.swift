@@ -7,6 +7,19 @@ enum RecordingAlbum {
     static let title = "ScreenBrief"
     static let filePrefix = "ScreenBrief-"
 
+    /// A recording too large to attach in one file is also saved as parts. This is a part's title
+    /// (written into its movie, where the Mac's `screenbrief pull` reads it) and, with ".mov", its
+    /// file name in Photos: "ScreenBrief-<id>-part<k>of<n>".
+    static func partTitle(id: String, part: Int, of total: Int) -> String {
+        "\(filePrefix)\(id)-part\(part)of\(total)"
+    }
+
+    /// True for a part's file name. Parts are never recordings of their own.
+    static func isPart(fileName: String) -> Bool {
+        let stem = (fileName as NSString).deletingPathExtension
+        return stem.range(of: "^\(filePrefix).+-part[0-9]+of[0-9]+$", options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     static func statusName(_ status: PHAuthorizationStatus) -> String {
         switch status {
         case .notDetermined: return "notDetermined"

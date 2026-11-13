@@ -15,7 +15,8 @@ copied text is plain, so any agent that can run a command on the Mac can follow 
 3. Stop from the red status bar pill, or come back to ScreenBrief and tap the button again.
 4. Open the recording in ScreenBrief, check the transcript, tap **Copy**.
 5. Paste into the agent's thread. If the Mac cannot reach the phone (you are away from it), also attach
-   the video from Photos, album "ScreenBrief".
+   the video from Photos, album "ScreenBrief". A recording over 50 MB is attached as its parts; the app
+   says how many.
 
 The agent runs `screenbrief pull <id>`, reads the `FEEDBACK.md` it prints, opens the frames, and makes
 the changes. If it cannot get the video it is told to wait for you rather than guess from the transcript.
@@ -56,8 +57,8 @@ flowchart LR
   - on the iPhone, through the developer pairing Xcode already has with it (phone unlocked, on the same
     Wi-Fi as the Mac or plugged in);
   - among the files attached in T3 Code (`~/.t3/userdata/attachments`), matched by the title the
-    recorder writes into each movie (`ScreenBrief-<id>`), or for older recordings by the start time,
-    which is also the id.
+    recorder writes into each movie (`ScreenBrief-<id>`, or `ScreenBrief-<id>-part2of3` for a part),
+    or for older recordings by the start time, which is also the id.
 
   It then transcribes with whisper.cpp, picks the frames that matter (the start of each spoken phrase,
   each screen change, each touch mark) and writes a bundle to `~/ScreenBrief/recordings/phone-<id>/`
@@ -73,9 +74,11 @@ Mac and there is no pairing step.
 
 ## Limits
 
-- **About 8 minutes per recording when you attach the video.** T3 Code attaches files up to 50 MB.
-  A longer recording still works when the Mac can reach the phone; the app warns you and the copied
-  text says so.
+- **About 8 minutes per file when you attach the video.** T3 Code attaches files up to 50 MB each.
+  The app splits a longer recording into parts that fit (no re-encoding) and saves them to Photos next
+  to the original; you attach all the parts and `screenbrief pull` joins them. In the Photos picker the
+  parts are the shorter videos right after the full one. When the Mac can reach the phone it copies the
+  whole recording and the parts are not needed.
 - **Portrait.** The movie's orientation is fixed by its first frame. Turning the phone to landscape
   partway through leaves that stretch sideways.
 - **Touches are not recorded** unless the app you are testing has the overlay.
