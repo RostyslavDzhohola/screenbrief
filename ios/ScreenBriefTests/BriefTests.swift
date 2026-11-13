@@ -852,6 +852,21 @@ final class BriefTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: movie), Data([1, 2, 3]))
     }
 
+    func testAFailedCopyKeepsTheMovieThatWasThere() async throws {
+        let files = scratchFiles()
+        let movie = files.recordings.appendingPathComponent("20261111-224105.mov")
+        try Data([9]).write(to: movie)
+        do {
+            try await RecordingFiles.writeThenMove(to: movie) { partial in
+                try Data([1, 2, 3]).write(to: partial)
+                throw Transcriber.Failure(message: "iCloud download failed")
+            }
+            XCTFail("the error must reach the caller")
+        } catch {}
+        XCTAssertEqual(try names(in: files), ["20261111-224105.mov"])
+        XCTAssertEqual(try Data(contentsOf: movie), Data([9]))
+    }
+
     func testStalePartialCopiesAreDeleted() throws {
         let files = scratchFiles()
         let r = recording()

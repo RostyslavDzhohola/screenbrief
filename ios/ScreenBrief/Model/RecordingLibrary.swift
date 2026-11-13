@@ -73,8 +73,12 @@ struct RecordingFiles {
         try? FileManager.default.removeItem(at: partial)
         do {
             try await write(partial)
-            try? FileManager.default.removeItem(at: url)
-            try FileManager.default.moveItem(at: partial, to: url)
+            if FileManager.default.fileExists(atPath: url.path) {
+                // Swaps the files in one step: if it fails, the movie that was there is still there.
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: partial)
+            } else {
+                try FileManager.default.moveItem(at: partial, to: url)
+            }
         } catch {
             try? FileManager.default.removeItem(at: partial)
             throw error
@@ -119,19 +123,13 @@ enum PhotoSource {
     static func candidates() -> [Candidate] {
         var found: [String: Candidate] = [:]
         if let album = RecordingAlbum.fetchAlbum() {
-            let assets = PHAsset.fetchAssets(in: album, options: videoOptions(limit: 200))
-            assets.enumerateObjects { asset, _, _ in
-                let name = fileName(of: asset)
-                guard !RecordingAlbum.isPart(fileName: name) else { return }
+            newest(PHAsset.fetchAssets(in: album, options: videoOptions()), limit: 200) { asset, name in
                 found[asset.localIdentifier] = Candidate(asset: asset, source: "screenbrief", fileName: name)
             }
         }
-        let recent = PHAsset.fetchAssets(with: .video, options: videoOptions(limit: 60))
         var screenRecordings = 0
-        recent.enumerateObjects { asset, _, _ in
+        newest(PHAsset.fetchAssets(with: .video, options: videoOptions()), limit: 60) { asset, name in
             guard found[asset.localIdentifier] == nil else { return }
-            let name = fileName(of: asset)
-            guard !RecordingAlbum.isPart(fileName: name) else { return }
             if name.hasPrefix(RecordingAlbum.filePrefix) {
                 found[asset.localIdentifier] = Candidate(asset: asset, source: "screenbrief", fileName: name)
             } else if asset.mediaSubtypes.contains(.videoScreenRecording),
@@ -144,11 +142,27 @@ enum PhotoSource {
         return found.values.sorted { ($0.asset.creationDate ?? .distantPast) > ($1.asset.creationDate ?? .distantPast) }
     }
 
-    private static func videoOptions(limit: Int) -> PHFetchOptions {
+    /// Calls `body` with the newest `limit` videos that are not parts of a split recording. The
+    /// count is kept here and not as a fetch limit, which the parts would use up: a few long
+    /// recordings would then hide every older one. At most ten times `limit` videos are looked at.
+    private static func newest(_ videos: PHFetchResult<PHAsset>, limit: Int, _ body: (PHAsset, String) -> Void) {
+        var taken = 0
+        var looked = 0
+        videos.enumerateObjects { asset, _, stop in
+            looked += 1
+            let name = fileName(of: asset)
+            if !RecordingAlbum.isPart(fileName: name) {
+                body(asset, name)
+                taken += 1
+            }
+            if taken >= limit || looked >= limit * 10 { stop.pointee = true }
+        }
+    }
+
+    private static func videoOptions() -> PHFetchOptions {
         let o = PHFetchOptions()
         o.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         o.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.video.rawValue)
-        o.fetchLimit = limit
         return o
     }
 
